@@ -4,138 +4,147 @@ name: 저축은행 데이터 스크래핑
 on:
   # 수동 실행 가능
   workflow_dispatch:
-  
-  # 정기 실행 - 매일 한국시간 오전 10시 (UTC 01:00)
+
+  # 정기 실행
   schedule:
-    # 매월 20일부터 말일까지 매일 체크
-    - cron: '0 1 20-31 5,8,11 *'  # 5월, 8월, 11월의 20-31일 UTC 01:00
-  
-  # 테스트를 위한 push 트리거 (선택사항)
-  # push:
-  #   branches: [ main ]
+    # 매월 5,8,11월의 20일부터 말일까지 매일 UTC 01:00 (KST 10:00)에 실행
+    - cron: '0 1 20-31 5,8,11 *'
 
 # 환경 변수 설정
 env:
-  TZ: 'Asia/Seoul'  # 한국 시간대 설정
+  TZ: 'Asia/Seoul' # 한국 시간대 설정
+  PYTHON_VERSION: '3.9' # 파이썬 버전 중앙 관리
 
 jobs:
   check-and-scrape:
     runs-on: ubuntu-latest
-    
+
     steps:
     # 1. 코드 체크아웃
     - name: 코드 체크아웃
-      uses: actions/checkout@v3
-    
+      uses: actions/checkout@v4 # 최신 버전 사용
+
     # 2. Python 환경 설정
-    - name: Python 3.9 설정
-      uses: actions/setup-python@v4
+    - name: Python ${{ env.PYTHON_VERSION }} 설정
+      uses: actions/setup-python@v5 # 최신 버전 사용
       with:
-        python-version: '3.9'
-    
+        python-version: ${{ env.PYTHON_VERSION }}
+
     # 3. 마지막 평일인지 확인
     - name: 마지막 평일 확인
       id: check-date
       run: |
-        python << EOF
+        python_code=$(cat <<EOF
         import datetime
         import calendar
         import sys
-        
+        import os
+
         # 한국 시간 기준 현재 날짜
         today = datetime.datetime.now()
         year = today.year
         month = today.month
         day = today.day
-        
+
         # 대상 월인지 확인
         if month not in [5, 8, 11]:
             print(f"대상 월이 아닙니다: {month}월")
-            print("::set-output name=should_run::false")
-            sys.exit(0)
-        
-        # 해당 월의 마지막 날
-        last_day = calendar.monthrange(year, month)[1]
-        
-        # 마지막 평일 찾기
-        for d in range(last_day, 0, -1):
-            date = datetime.date(year, month, d)
-            # 월요일(0) ~ 금요일(4)이 평일
-            if date.weekday() < 5:
-                last_weekday = d
-                break
-        
-        # 오늘이 마지막 평일인지 확인
-        if day == last_weekday:
-            print(f"오늘({year}년 {month}월 {day}일)은 마지막 평일입니다. 스크래핑을 실행합니다.")
-            print("::set-output name=should_run::true")
+            is_target_day = "false"
         else:
-            print(f"오늘({year}년 {month}월 {day}일)은 마지막 평일이 아닙니다. (마지막 평일: {last_weekday}일)")
-            print("::set-output name=should_run::false")
+            # 해당 월의 마지막 날
+            last_day_num = calendar.monthrange(year, month)[1]
+            
+            # 마지막 평일 찾기
+            actual_last_weekday = -1
+            for d_num in range(last_day_num, 0, -1):
+                date_to_check = datetime.date(year, month, d_num)
+                if date_to_check.weekday() < 5: # 월요일(0) ~ 금요일(4)
+                    actual_last_weekday = d_num
+                    break
+            
+            if day == actual_last_weekday:
+                print(f"오늘({year}년 {month}월 {day}일)은 마지막 평일입니다. 스크래핑을 실행합니다.")
+                is_target_day = "true"
+            else:
+                print(f"오늘({year}년 {month}월 {day}일)은 마지막 평일이 아닙니다. (마지막 평일: {actual_last_weekday}일)")
+                is_target_day = "false"
+        
+        # GITHUB_OUTPUT 환경 변수에 값 쓰기
+        if os.getenv('GITHUB_OUTPUT'):
+            with open(os.getenv('GITHUB_OUTPUT'), 'a') as f:
+                f.write(f"should_run={is_target_day}\n")
+        else: # 로컬 테스트 등 GITHUB_OUTPUT이 없을 경우 대비
+            print(f"should_run={is_target_day}")
+
         EOF
-    
-    # 4. 스크래핑 실행 (마지막 평일인 경우만)
+        )
+        python -c "$python_code"
+
+
+    # 4. Chrome 브라우저 설치 (날짜 확인 후 실행 조건에 부합하거나 수동 실행 시)
+    - name: Google Chrome 설치
+      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        google-chrome --version
+
+    # 5. 의존성 설치 (날짜 확인 후 실행 조건에 부합하거나 수동 실행 시)
     - name: 의존성 설치
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        # Python 패키지 설치
-        pip install --upgrade pip
-        pip install selenium pandas beautifulsoup4 openpyxl webdriver-manager
-        
-        # Chrome 브라우저 설치
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable
-        
-        # Chrome 버전 확인
-        google-chrome --version
-    
-    # 5. 스크래핑 실행
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt # requirements.txt 사용
+
+    # 6. 스크래핑 실행 (날짜 확인 후 실행 조건에 부합하거나 수동 실행 시)
     - name: 스크래핑 실행
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         python bank_scraper_headless.py
       env:
-        MAX_WORKERS: 2  # GitHub Actions에서는 적은 수 권장
+        # 스크립트 내에서 os.getenv로 읽는 환경 변수들
+        # OUTPUT_DIR: 스크립트 기본값 사용 (./output/저축은행_데이터_날짜)
+        MAX_WORKERS: 2
         MAX_RETRIES: 3
-        PAGE_LOAD_TIMEOUT: 30
+        PAGE_LOAD_TIMEOUT: 45 # 약간 늘림
         # Gmail 설정 (GitHub Secrets에서 가져옴)
         GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
-    
-    # 6. 결과 업로드
+
+    # 7. 결과 업로드 (날짜 확인 후 실행 조건에 부합하거나 수동 실행 시)
     - name: 결과 파일 업로드
-      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      uses: actions/upload-artifact@v3
+      if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && (success() || failure()) # 성공/실패 시 모두 업로드
+      uses: actions/upload-artifact@v4 # 최신 버전 사용
       with:
-        name: 저축은행-데이터-${{ github.run_number }}
+        name: 저축은행-데이터-${{ env.TZ_DATE }}-${{ github.run_number }}
         path: |
           output/
           *.zip
           scraping.log
-        retention-days: 90  # 90일간 보관
-    
-    # 7. 릴리즈 생성 (선택사항)
+        retention-days: 90 # 90일간 보관
+      env:
+        TZ_DATE: $(date +%Y%m%d) # 업로드 시점의 날짜 (TZ 환경변수 따름)
+
+    # 8. 릴리즈 생성 (선택사항, 날짜 확인 후 실행 조건에 부합하거나 수동 실행 시)
     - name: 릴리즈 생성
-      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v1
+      if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && success() # 성공 시에만 릴리즈
+      uses: softprops/action-gh-release@v2 # 최신 버전 사용
       with:
-        tag_name: v${{ github.run_number }}
-        name: 저축은행 데이터 - ${{ github.run_number }}
+        tag_name: data-v${{ env.TZ_DATE }}-${{ github.run_number }}
+        name: 저축은행 데이터 ${{ env.TZ_DATE }} (Build ${{ github.run_number }})
         body: |
           자동 생성된 저축은행 데이터입니다.
-          생성 시간: ${{ github.event.repository.updated_at }}
+          생성 시간 (KST): $(date '+%Y-%m-%d %H:%M:%S %Z')
         files: |
           *.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    
-    # 8. 실패 시 알림 (선택사항 - Slack 예시)
+        TZ_DATE: $(date +%Y%m%d)
+
+    # 9. 실패 시 알림 (선택사항)
     - name: 실패 알림
-      if: failure()
+      if: failure() && (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') # 실제 실행 중 실패 시
       run: |
-        echo "스크래핑 실패! 로그를 확인하세요."
-        # Slack 웹훅이 있다면 여기에 추가
-        # curl -X POST -H 'Content-type: application/json' \
-        #   --data '{"text":"저축은행 스크래핑 실패!"}' \
-        #   ${{ secrets.SLACK_WEBHOOK_URL }}
+        echo "스크래핑 실패! 워크플로우 로그 및 업로드된 scraping.log 파일을 확인하세요."
+        # 필요한 경우 여기에 Slack 또는 이메일 알림 로직 추가 (스크립트 내 이메일 기능과 별개)

@@ -2,14 +2,16 @@
 """
 저축은행 중앙회 통일경영공시 데이터 자동 스크래핑 도구 (GitHub Actions 최적화 버전)
 목적: GitHub Actions에서 자동 실행, 병렬 처리를 통한 속도 개선
-작성일: 2025-03-31 (최종 수정일: 2025-05-27)
+작성일: 2025-03-31 (최종 수정일: 2025-05-28)
 특징:
 - GUI 없음, CLI 기반 실행
 - asyncio 및 ThreadPoolExecutor를 사용한 병렬 처리 (Semaphore로 동시 작업 제어)
 - GitHub Actions 환경에 최적화된 WebDriver 설정
 - 환경 변수를 통한 주요 설정 관리
 - 자동 재시도 및 강화된 에러 핸들링
-- 이메일 알림 기능
+- 이메일 알림 기능 (은행별 공시 날짜 포함)
+- 실행 시간 단축을 위한 대기 시간 최적화
+- 공시 날짜 확인 및 경고 기능 추가
 """
 
 import os
@@ -23,7 +25,7 @@ import concurrent.futures # 명시적으로 사용하진 않지만 run_in_execut
 import zipfile
 from datetime import datetime
 from io import StringIO
-import argparse
+import argparse # 현재는 직접 사용하지 않으나, 향후 CLI 옵션 확장 가능성 있음
 import logging
 from pathlib import Path
 import queue # 드라이버 풀 관리를 위해 추가
@@ -69,8 +71,6 @@ def setup_logging(log_file_path, log_level="INFO"):
     # 서드파티 라이브러리 로거 레벨 조정
     logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.WARNING)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
-    # webdriver_manager 로거 레벨 조정 (사용 시)
-    # logging.getLogger('webdriver_manager').setLevel(logging.WARNING)
     return logging.getLogger(__name__) # 현재 모듈의 로거 반환
 
 logger = None # Config 초기화 후 설정됨
@@ -86,7 +86,6 @@ class EmailSender:
         
         self.enabled = bool(self.sender_email and self.sender_password and self.recipient_emails)
         if not self.enabled:
-            # logger가 설정된 이후에 호출되도록 main 로직에서 EmailSender 인스턴스 생성
             if logger: logger.warning("이메일 설정(GMAIL_ADDRESS, GMAIL_APP_PASSWORD, RECIPIENT_EMAILS)이 유효하지 않아 이메일 전송을 건너뜁니다.")
         else:
             if logger: logger.info(f"이메일 전송 설정 완료. 수신자: {', '.join(self.recipient_emails)}")
@@ -108,9 +107,8 @@ class EmailSender:
                     part = MIMEBase('application', 'octet-stream')
                     part.set_payload(attachment_file.read())
                     encoders.encode_base64(part)
-                    # 파일명에 UTF-8 인코딩 적용 (RFC 2231)
                     filename_encoded = f"\"{os.path.basename(attachment_path)}\""
-                    try: # 시도해보고 안되면 기본으로
+                    try: 
                         filename_encoded = encoders.encode_rfc2231(os.path.basename(attachment_path))
                         part.add_header('Content-Disposition', 'attachment', filename=filename_encoded)
                     except:
@@ -119,9 +117,9 @@ class EmailSender:
                 if logger: logger.info(f"첨부 파일 추가: {attachment_path}")
             
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.ehlo() # SMTP 서버에 인사
-                server.starttls() # TLS 암호화 시작
-                server.ehlo() # TLS 후 다시 인사
+                server.ehlo() 
+                server.starttls() 
+                server.ehlo() 
                 server.login(self.sender_email, self.sender_password)
                 server.send_message(msg)
             if logger: logger.info(f"이메일 전송 성공: {', '.join(self.recipient_emails)}")
@@ -133,11 +131,11 @@ class EmailSender:
 # --- 설정 클래스 ---
 class Config:
     def __init__(self):
-        self.VERSION = "2.6-opt-fix" # 버전 업데이트
+        self.VERSION = "2.8-opt-emaildate" 
         self.BASE_URL = "https://www.fsb.or.kr/busmagequar_0100.act"
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))
-        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '20')) # 약간 줄임
-        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10')) # 약간 늘림
+        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '20')) 
+        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '10')) 
         self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '3')) 
 
         self.today = datetime.now().strftime("%Y%m%d")
@@ -149,7 +147,7 @@ class Config:
         self.log_file_path = self.output_dir / f'scraping_log_{self.today}.log'
 
         global logger
-        if logger is None: # 로거가 이미 설정되지 않은 경우에만 설정
+        if logger is None: 
             logger = setup_logging(self.log_file_path, os.getenv('LOG_LEVEL', 'INFO'))
 
         self.BANKS = [
@@ -174,7 +172,6 @@ class Config:
 class DriverManager:
     def __init__(self, config):
         self.config = config
-        # maxsize는 실제 동시에 필요한 드라이버 수 (MAX_WORKERS와 동일)
         self.driver_pool = queue.Queue(maxsize=self.config.MAX_WORKERS)
         self._initialize_pool()
 
@@ -188,15 +185,14 @@ class DriverManager:
         options.add_argument('--window-size=1920,1080')
         options.add_argument('user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         options.add_argument('--disable-extensions')
-        options.add_argument('--disable-browser-side-navigation')
+        options.add_argument('--disable-browser-side-navigation') # 일부 환경에서 안정성 향상
         options.add_argument('--disable-infobars')
         options.add_argument('--disable-notifications')
         options.add_argument('--disable-popup-blocking')
-        options.add_argument('--blink-settings=imagesEnabled=false')
-        options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation']) # automation 배너 제거 시도
+        options.add_argument('--blink-settings=imagesEnabled=false') # 이미지 로딩 비활성화
+        options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         options.add_experimental_option('useAutomationExtension', False)
-        # options.set_capability('goog:loggingPrefs', {'performance': 'OFF', 'browser': 'OFF'}) # 로그 최소화
-
+        
         driver = webdriver.Chrome(options=options)
         driver.set_page_load_timeout(self.config.PAGE_LOAD_TIMEOUT)
         logger.debug("새 WebDriver 인스턴스 생성 완료.")
@@ -207,56 +203,48 @@ class DriverManager:
         for i in range(self.config.MAX_WORKERS):
             try:
                 driver = self._create_new_driver()
-                self.driver_pool.put_nowait(driver) # 비동기적 초기화이므로 nowait 사용
+                self.driver_pool.put_nowait(driver) 
                 logger.debug(f"드라이버 {i+1} 생성하여 풀에 추가. 현재 풀 크기: {self.driver_pool.qsize()}")
             except queue.Full:
-                logger.warning(f"드라이버 {i+1} 추가 시도 중 풀이 꽉 참. (이론상 발생 안함)")
-                break # 풀이 꽉 찼으면 더 이상 추가하지 않음
+                logger.warning(f"드라이버 {i+1} 추가 시도 중 풀이 꽉 참.")
+                break 
             except Exception as e:
                 logger.error(f"초기 드라이버 {i+1} 생성 실패: {e}", exc_info=True)
         logger.info(f"드라이버 풀 초기화 완료. 사용 가능 드라이버: {self.driver_pool.qsize()}개.")
 
     def get_driver(self):
         try:
-            # timeout을 설정하여 너무 오래 기다리지 않도록 함
             driver = self.driver_pool.get(block=True, timeout=60) 
             logger.debug(f"풀에서 드라이버 가져옴. 남은 드라이버: {self.driver_pool.qsize()}")
             return driver
         except queue.Empty:
             logger.error(f"60초 대기 후에도 풀에서 드라이버를 가져오지 못함 (MAX_WORKERS: {self.config.MAX_WORKERS}).")
-            # 이 경우, Semaphore 로직이 제대로 동작하지 않거나 작업이 너무 길어지는 문제일 수 있음.
-            # 임시 드라이버 생성 대신 예외를 발생시키거나 None을 반환하여 상위에서 처리하도록 유도.
             raise TimeoutError("드라이버 풀에서 드라이버를 가져오는 데 실패했습니다.")
-
 
     def return_driver(self, driver):
         if driver:
             returned_successfully = False
             try:
-                _ = driver.title # 드라이버 상태 확인용 간단한 호출
+                _ = driver.title 
                 if self.driver_pool.qsize() < self.config.MAX_WORKERS:
-                    self.driver_pool.put_nowait(driver) # 즉시 반납 시도
+                    self.driver_pool.put_nowait(driver) 
                     returned_successfully = True
                     logger.debug(f"사용된 드라이버 풀에 반환. 현재 풀 크기: {self.driver_pool.qsize()}")
                 else:
                     logger.warning(f"드라이버 풀이 이미 꽉 차있어({self.driver_pool.qsize()}), 반환 시도한 드라이버를 종료합니다.")
                     driver.quit()
-            except queue.Full: # put_nowait으로 인해 발생 가능
+            except queue.Full: 
                 logger.warning(f"드라이버 반납 시 풀이 꽉 참(Full). 드라이버를 종료합니다. 현재 풀 크기: {self.driver_pool.qsize()}")
                 driver.quit()
             except Exception as e:
                 logger.warning(f"손상된 드라이버 반환 시도 ({type(e).__name__}: {e}). 드라이버를 종료합니다.")
                 try:
                     driver.quit()
-                except:
-                    pass # 이미 종료되었을 수 있음
-                # 손상된 드라이버 대신 새 드라이버를 풀에 추가 (풀 크기 유지)
-                if not returned_successfully: # 반납에 성공하지 못한 경우에만 새 드라이버 추가
-                     self._add_new_driver_to_pool_if_needed()
+                except: pass 
+                if not returned_successfully: 
+                    self._add_new_driver_to_pool_if_needed()
             
     def _add_new_driver_to_pool_if_needed(self):
-        # 이 함수는 드라이버가 손상되어 종료된 후 호출됨
-        # 풀에 공간이 있는지 확인하고 새 드라이버 추가
         if self.driver_pool.qsize() < self.config.MAX_WORKERS:
             try:
                 logger.info("손상된 드라이버 대체 위해 새 드라이버 생성 시도...")
@@ -269,7 +257,6 @@ class DriverManager:
                 logger.error(f"대체 드라이버 생성 실패: {e_new}", exc_info=True)
         else:
             logger.debug("풀이 이미 최대 용량이므로 대체 드라이버를 추가하지 않음.")
-
 
     def quit_all(self):
         logger.info("모든 드라이버 종료 시작...")
@@ -297,49 +284,74 @@ class ProgressManager:
         self.progress = self._load()
 
     def _load(self):
+        default_progress = {'banks': {}, 'stats': {'last_run': None, 'success_count': 0, 'failure_count': 0}}
         if self.progress_file_path.exists():
             try:
                 with open(self.progress_file_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    loaded_progress = json.load(f)
+                    if 'banks' not in loaded_progress: # 이전 버전 호환성
+                        logger.warning("progress.json에 'banks' 키가 없습니다. 새 구조로 초기화합니다.")
+                        loaded_progress['banks'] = {}
+                    if 'stats' not in loaded_progress: # 이전 버전 호환성
+                        loaded_progress['stats'] = default_progress['stats']
+                    return loaded_progress
             except json.JSONDecodeError:
                 logger.warning(f"진행 상황 파일({self.progress_file_path}) 손상. 새로 시작합니다.")
             except Exception as e:
                 logger.warning(f"진행 상황 파일 로드 중 오류({type(e).__name__}: {e}). 새로 시작합니다.")
-        return {'completed': [], 'failed': [], 'stats': {'last_run': None, 'success_count': 0, 'failure_count': 0}}
+        return default_progress
 
     def save(self):
         self.progress['stats']['last_run'] = datetime.now().isoformat()
-        self.progress['stats']['success_count'] = len(self.progress.get('completed', []))
-        self.progress['stats']['failure_count'] = len(self.progress.get('failed', []))
+        
+        completed_count = 0
+        failure_count = 0
+        if 'banks' in self.progress:
+            for bank_info in self.progress['banks'].values():
+                if bank_info.get('status') == 'completed':
+                    completed_count += 1
+                elif bank_info.get('status') == 'failed':
+                    failure_count += 1
+        
+        self.progress['stats']['success_count'] = completed_count
+        self.progress['stats']['failure_count'] = failure_count
+        
         try:
             with open(self.progress_file_path, 'w', encoding='utf-8') as f:
                 json.dump(self.progress, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"진행 상황 파일 저장 실패: {e}", exc_info=True)
 
-    def mark_completed(self, bank_name):
-        completed_list = self.progress.setdefault('completed', [])
-        failed_list = self.progress.setdefault('failed', [])
-        if bank_name not in completed_list:
-            completed_list.append(bank_name)
-        if bank_name in failed_list:
-            failed_list.remove(bank_name)
+    def mark_completed(self, bank_name, date_info):
+        self.progress.setdefault('banks', {})[bank_name] = {
+            'status': 'completed',
+            'date_info': date_info
+        }
         self.save()
 
     def mark_failed(self, bank_name):
-        completed_list = self.progress.setdefault('completed', [])
-        failed_list = self.progress.setdefault('failed', [])
-        if bank_name not in failed_list and bank_name not in completed_list:
-            failed_list.append(bank_name)
+        # 실패 시 기존에 성공한 은행의 date_info를 유지할지, 아니면 초기화할지 결정.
+        # 현재는 실패 시 date_info는 이전 값을 유지하거나 없으면 None.
+        existing_date_info = self.progress.get('banks', {}).get(bank_name, {}).get('date_info')
+        self.progress.setdefault('banks', {})[bank_name] = {
+            'status': 'failed',
+            'date_info': existing_date_info 
+        }
         self.save()
 
     def get_pending_banks(self):
-        completed_set = set(self.progress.get('completed', []))
-        # 실패한 은행도 일단은 재시도 대상에서 제외 (필요시 로직 변경)
-        # failed_set = set(self.progress.get('failed', []))
-        # processed_set = completed_set.union(failed_set)
-        # return [bank for bank in self.config.BANKS if bank not in processed_set]
-        return [bank for bank in self.config.BANKS if bank not in completed_set]
+        processed_banks = self.progress.get('banks', {})
+        pending_banks = [
+            bank for bank in self.config.BANKS
+            if bank not in processed_banks or processed_banks[bank].get('status') != 'completed'
+        ]
+        # 실패한 은행을 재시도하지 않으려면:
+        # pending_banks = [bank for bank in self.config.BANKS if bank not in processed_banks.keys()]
+        logger.info(f"보류 중인 은행 수 (재시도 포함 가능): {len(pending_banks)}")
+        return pending_banks
+        
+    def get_bank_data(self, bank_name): # 특정 은행의 저장된 정보 가져오기 (필요시 사용)
+        return self.progress.get('banks', {}).get(bank_name)
 
 # --- 스크래퍼 클래스 ---
 class BankScraper:
@@ -378,13 +390,11 @@ class BankScraper:
         try:
             js_script = """
             var bodyText = document.body.innerText;
-            var datePattern = /(\d{4}년\s*\d{1,2}월말)/g; // 공백 허용
+            var datePattern = /(\d{4}년\s*\d{1,2}월말)/g; 
             var matches = bodyText.match(datePattern);
             if (matches && matches.length > 0) {
-                // 여러 날짜 중 가장 빈번하거나 특정 패턴에 맞는 것 선택 (여기서는 첫번째)
-                return matches[0].replace(/\s+/g, ''); // 공백 제거 후 반환
+                return matches[0].replace(/\s+/g, ''); 
             }
-            // 추가 탐색: h1~h6, th, p 태그 등
             var tags = ['h1', 'h2', 'h3', 'th', 'p', 'span', 'div'];
             for (var i = 0; i < tags.length; i++) {
                 var elements = document.getElementsByTagName(tags[i]);
@@ -411,9 +421,8 @@ class BankScraper:
         WebDriverWait(driver, self.config.PAGE_LOAD_TIMEOUT).until(
             lambda d: d.execute_script('return document.readyState') == 'complete'
         )
-        time.sleep(random.uniform(0.8, 1.5)) # 페이지 안정화 대기
+        time.sleep(random.uniform(0.4, 0.8)) # 시간 단축
 
-        # 전략 1: XPath (정확한 일치 우선)
         exact_xpaths = [
             f"//td[normalize-space(text())='{bank_name}']",
             f"//a[normalize-space(text())='{bank_name}']"
@@ -423,13 +432,11 @@ class BankScraper:
                 elements = driver.find_elements(By.XPATH, xpath)
                 for element in elements:
                     if element.is_displayed():
-                        logger.debug(f"[{bank_name}] XPath (정확) '{xpath}' 찾음. 클릭.")
                         if self._robust_click(driver, element):
-                            time.sleep(random.uniform(1.0, 2.0)) # 페이지 전환 대기
+                            time.sleep(random.uniform(0.5, 1.0)) # 시간 단축
                             return True
             except Exception as e: logger.debug(f"XPath (정확) '{xpath}' 오류: {e}")
         
-        # 전략 2: JavaScript (텍스트 포함)
         js_script = f"""
         var elements = Array.from(document.querySelectorAll('a, td'));
         var targetElement = elements.find(el => el.textContent && el.textContent.trim().includes('{bank_name}'));
@@ -437,21 +444,17 @@ class BankScraper:
             targetElement.scrollIntoView({{block: 'center', inline: 'nearest'}});
             if (targetElement.tagName === 'TD' && targetElement.querySelector('a')) {{
                 targetElement.querySelector('a').click();
-            }} else {{
-                targetElement.click();
-            }}
+            }} else {{ targetElement.click(); }}
             return true;
-        }}
-        return false;
+        }} return false;
         """
         try:
             if driver.execute_script(js_script):
                 logger.debug(f"[{bank_name}] JavaScript로 은행 선택 성공.")
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(random.uniform(0.5, 1.0)) # 시간 단축
                 return True
         except Exception as e: logger.debug(f"[{bank_name}] JavaScript 선택 오류: {e}")
 
-        # 전략 3: XPath (부분 일치)
         partial_xpaths = [
             f"//td[contains(normalize-space(.), '{bank_name}')]",
             f"//a[contains(normalize-space(.), '{bank_name}')]"
@@ -459,13 +462,11 @@ class BankScraper:
         for xpath in partial_xpaths:
             try:
                 elements = driver.find_elements(By.XPATH, xpath)
-                # 가장 짧은 텍스트를 가진 요소를 우선 (더 정확한 매칭 가능성)
                 elements.sort(key=lambda x: len(x.text) if x.text else float('inf'))
                 for element in elements:
                     if element.is_displayed():
-                        logger.debug(f"[{bank_name}] XPath (부분) '{xpath}' (text: {element.text[:20]}) 찾음. 클릭.")
                         if self._robust_click(driver, element):
-                            time.sleep(random.uniform(1.0, 2.0))
+                            time.sleep(random.uniform(0.5, 1.0)) # 시간 단축
                             return True
             except Exception as e: logger.debug(f"XPath (부분) '{xpath}' 오류: {e}")
 
@@ -474,42 +475,36 @@ class BankScraper:
 
     def select_category(self, driver, category_name):
         logger.debug(f"카테고리 선택 시도: '{category_name}'")
-        time.sleep(random.uniform(0.3, 0.7)) # 탭 로드 대기
+        time.sleep(random.uniform(0.2, 0.5)) # 시간 단축
 
-        # XPath, CSS Selector, JavaScript 등 다양한 방법 시도
         selectors = [
             (By.XPATH, f"//a[normalize-space(translate(text(), ' \t\n\r', ''))='{category_name.replace(' ', '')}']"),
             (By.XPATH, f"//button[normalize-space(translate(text(), ' \t\n\r', ''))='{category_name.replace(' ', '')}']"),
-            (By.LINK_TEXT, category_name), # 정확한 링크 텍스트
-            (By.PARTIAL_LINK_TEXT, category_name) # 부분 링크 텍스트
+            (By.LINK_TEXT, category_name),
+            (By.PARTIAL_LINK_TEXT, category_name)
         ]
-        
         for by_type, selector_val in selectors:
             try:
                 elements = driver.find_elements(by_type, selector_val)
                 for element in elements:
                     if element.is_displayed() and element.is_enabled():
-                        logger.debug(f"'{category_name}' 카테고리: {by_type} '{selector_val}' 찾음. 클릭.")
                         if self._robust_click(driver, element):
-                            time.sleep(random.uniform(0.7, 1.2)) # 탭 내용 로드 대기
+                            time.sleep(random.uniform(0.4, 0.8)) # 시간 단축
                             return True
             except Exception as e: logger.debug(f"카테고리 선택 중 {by_type} '{selector_val}' 오류: {e}")
         
-        # JavaScript로 최종 시도
         js_script = f"""
         var elements = Array.from(document.querySelectorAll('a, li, button, span, div[role="tab"]'));
         var targetElement = elements.find(el => el.textContent && el.textContent.trim().includes('{category_name}'));
         if (targetElement) {{
             targetElement.scrollIntoView({{block: 'center', inline: 'nearest'}});
-            targetElement.click();
-            return true;
-        }}
-        return false;
+            targetElement.click(); return true;
+        }} return false;
         """
         try:
             if driver.execute_script(js_script):
                 logger.debug(f"'{category_name}' 카테고리: JavaScript로 선택 성공.")
-                time.sleep(random.uniform(0.7, 1.2))
+                time.sleep(random.uniform(0.4, 0.8)) # 시간 단축
                 return True
         except Exception as e: logger.debug(f"'{category_name}' 카테고리: JavaScript 선택 오류: {e}")
 
@@ -521,7 +516,7 @@ class BankScraper:
         WebDriverWait(driver, self.config.PAGE_LOAD_TIMEOUT).until(
             lambda d: d.execute_script('return document.readyState') == 'complete'
         )
-        time.sleep(random.uniform(0.5, 1.0)) # AJAX 컨텐츠 등 추가 로드 대기
+        time.sleep(random.uniform(0.3, 0.6)) # 시간 단축
 
         try:
             html_source = driver.page_source
@@ -529,43 +524,26 @@ class BankScraper:
                 logger.debug("페이지 소스가 매우 짧거나 table 태그 없음.")
                 return []
 
-            # pandas.read_html은 lxml이 설치되어 있으면 기본으로 사용, 없으면 bs4+html5lib 시도
-            # flavor='bs4'를 명시했으므로 beautifulsoup4와 html5lib(또는 lxml) 필요
             dfs = pd.read_html(StringIO(html_source), flavor='bs4', encoding='utf-8')
-            
             valid_dfs = []
             if dfs:
                 logger.debug(f"pandas.read_html이 {len(dfs)}개의 DataFrame 반환.")
                 for idx, df in enumerate(dfs):
                     if not isinstance(df, pd.DataFrame) or df.empty:
-                        logger.debug(f"테이블 {idx}는 비어있거나 DataFrame이 아님. 건너뜀.")
                         continue
-                    
-                    df.dropna(axis=0, how='all', inplace=True) # 모든 값이 NaN인 행 제거
-                    df.dropna(axis=1, how='all', inplace=True) # 모든 값이 NaN인 열 제거
+                    df.dropna(axis=0, how='all', inplace=True)
+                    df.dropna(axis=1, how='all', inplace=True)
                     if df.empty:
-                        logger.debug(f"테이블 {idx}는 NaN 제거 후 비어있음. 건너뜀.")
                         continue
-
-                    # 컬럼 정리
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = ['_'.join(map(str, col)).strip('_ ') for col in df.columns.values]
                     else:
                         df.columns = [str(col).strip() for col in df.columns]
-                    
-                    # 데이터 타입 변환 시도 (숫자형으로) - 선택적
-                    # for col in df.columns:
-                    #     try:
-                    #         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.replace('-', '0'))
-                    #     except ValueError:
-                    #         pass # 숫자 변환 실패 시 원본 유지
-                                        
                     valid_dfs.append(df.reset_index(drop=True))
                 logger.debug(f"{len(valid_dfs)}개의 유효한 테이블 추출 완료.")
             else:
                 logger.debug("pandas.read_html이 테이블을 찾지 못했거나 빈 리스트 반환.")
             return valid_dfs
-            
         except ValueError as ve:
             logger.warning(f"pandas.read_html 실행 중 ValueError (테이블 없음 가능성): {ve}")
             return []
@@ -576,36 +554,43 @@ class BankScraper:
     def _scrape_single_bank_attempt(self, bank_name, driver):
         logger.info(f"[{bank_name}] 스크래핑 시도 시작...")
         
-        # 은행 선택 실패 시 빠르게 반환
         if not self.select_bank(driver, bank_name):
             logger.error(f"[{bank_name}] 은행 선택에 최종 실패했습니다.")
             return None
 
-        date_info = self.extract_date_information(driver)
-        logger.info(f"[{bank_name}] 공시 날짜 정보: {date_info}")
+        date_info_scraped = self.extract_date_information(driver)
+        logger.info(f"[{bank_name}] 공시 날짜 정보: {date_info_scraped}")
+
+        if date_info_scraped not in ["날짜 정보 없음", "날짜 추출 실패"]:
+            match = re.search(r'(\d{4})년\s*(\d{1,2})월말', date_info_scraped)
+            if match:
+                month_extracted = int(match.group(2))
+                expected_months = [3, 6, 9, 12] 
+                if month_extracted not in expected_months:
+                    logger.warning(f"[{bank_name}] 추출된 공시월({month_extracted}월)이 일반적인 분기 공시월({expected_months})과 다릅니다. (날짜: {date_info_scraped})")
+            else:
+                logger.warning(f"[{bank_name}] 날짜 형식이 'YYYY년 MM월말' 패턴과 일치하지 않습니다: {date_info_scraped}")
         
         bank_data_for_excel = {'_INFO_': pd.DataFrame({
-            '은행명': [bank_name], '공시날짜': [date_info], 
+            '은행명': [bank_name], '공시날짜': [date_info_scraped],
             '추출일시': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
             '스크래퍼버전': [self.config.VERSION]
         })}
         
         scraped_something_meaningful = False
-        original_url_after_bank_selection = driver.current_url # 카테고리 이동 후 돌아올 URL
+        original_url_after_bank_selection = driver.current_url 
 
         for category_name in self.config.CATEGORIES:
             logger.info(f"[{bank_name}] '{category_name}' 카테고리 처리 시작.")
-            
             category_selected = False
-            for attempt in range(2): # 카테고리 탭 클릭 2회 시도
-                if attempt > 0: # 첫 시도 실패 시
-                    logger.debug(f"[{bank_name}] '{category_name}' 탭 선택 재시도. 은행 페이지로 복귀 후 시도.")
-                    driver.get(original_url_after_bank_selection) # 은행 선택 직후 페이지로
+            for attempt in range(2): 
+                if attempt > 0: 
+                    logger.debug(f"[{bank_name}] '{category_name}' 탭 선택 재시도...")
+                    driver.get(original_url_after_bank_selection) 
                     WebDriverWait(driver, self.config.PAGE_LOAD_TIMEOUT).until(
                         lambda d: d.execute_script('return document.readyState') == 'complete'
                     )
-                    time.sleep(1.0) # 페이지 안정화
-
+                    time.sleep(0.5) 
                 if self.select_category(driver, category_name):
                     category_selected = True
                     break
@@ -621,7 +606,7 @@ class BankScraper:
                 logger.info(f"[{bank_name}] '{category_name}'에서 {len(tables)}개 테이블 발견.")
                 for i, df_table in enumerate(tables):
                     sheet_name = f"{category_name}_{i+1}"
-                    sheet_name = re.sub(r'[\\/*?:\[\]]', '', sheet_name)[:31] # 시트명 규칙
+                    sheet_name = re.sub(r'[\\/*?:\[\]]', '', sheet_name)[:31] 
                     bank_data_for_excel[sheet_name] = df_table
                 scraped_something_meaningful = True
             else:
@@ -642,9 +627,8 @@ class BankScraper:
             match = re.search(r'(\d{4})년(\d{1,2})월', raw_date_str)
             if match:
                 date_str_for_filename = f"{match.group(1)}-{int(match.group(2)):02d}"
-            elif raw_date_str and raw_date_str != '날짜 정보 없음' and raw_date_str != '날짜 추출 실패':
-                 date_str_for_filename = re.sub(r'[^\w\-_.]', '', raw_date_str)
-            # else: "날짜정보없음" 유지
+            elif raw_date_str and raw_date_str not in ['날짜 정보 없음', '날짜 추출 실패']:
+                date_str_for_filename = re.sub(r'[^\w\-_.]', '', raw_date_str)
 
         excel_file_name = f"{bank_name}_{date_str_for_filename}.xlsx"
         excel_path = self.config.output_dir / excel_file_name
@@ -661,32 +645,31 @@ class BankScraper:
             return False
 
     async def worker_process_bank(self, bank_name, pbar_instance, semaphore):
-        """단일 은행 스크래핑 작업자 (Semaphore 사용)"""
-        async with semaphore: # Semaphore 컨텍스트 내에서 작업 수행
+        async with semaphore:
             logger.debug(f"[{bank_name}] Semaphore 획득, 작업 시작.")
             driver = None
             success_status = False
+            bank_date_info_for_progress = self.progress_manager.get_bank_data(bank_name).get('date_info') if self.progress_manager.get_bank_data(bank_name) else None
+
+
             try:
-                # 드라이버 가져오기는 블로킹 호출이므로 run_in_executor 사용
                 driver = await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.get_driver)
                 if not driver:
                     logger.error(f"[{bank_name}] WebDriver를 가져올 수 없습니다. 건너뜁니다.")
                     self.progress_manager.mark_failed(bank_name)
-                    return bank_name, False
+                    return bank_name, False, bank_date_info_for_progress 
 
                 scraped_data = None
                 for attempt in range(self.config.MAX_RETRIES):
                     logger.info(f"[{bank_name}] 스크래핑 시도 {attempt + 1}/{self.config.MAX_RETRIES}")
                     try:
-                        # _scrape_single_bank_attempt는 내부적으로 Selenium (블로킹 I/O) 호출
-                        # 이 함수 자체를 run_in_executor로 감싸면 worker_process_bank가 더 이상 async일 필요가 없을 수 있음
-                        # 여기서는 _scrape_single_bank_attempt를 직접 호출 (이미 별도 스레드에서 실행 중이므로)
                         scraped_data = self._scrape_single_bank_attempt(bank_name, driver)
                         if scraped_data:
-                            logger.info(f"[{bank_name}] 데이터 스크랩 성공 (시도 {attempt + 1}).")
-                            break 
+                            bank_date_info_for_progress = scraped_data.get('_INFO_', pd.DataFrame({'공시날짜': ["날짜 기록 안됨"]}))['공시날짜'].iloc[0]
+                            logger.info(f"[{bank_name}] 데이터 스크랩 성공 (시도 {attempt + 1}). 날짜: {bank_date_info_for_progress}")
+                            break
                     except Exception as e_attempt:
-                        logger.warning(f"[{bank_name}] 스크래핑 시도 {attempt + 1} 중 예외: {e_attempt}")
+                        logger.warning(f"[{bank_name}] 스크래핑 시도 {attempt + 1} 중 예외: {type(e_attempt).__name__} - {e_attempt}")
                         if attempt < self.config.MAX_RETRIES - 1:
                             logger.info(f"[{bank_name}] 드라이버 재설정 및 재시도 준비.")
                             await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.return_driver, driver)
@@ -700,30 +683,31 @@ class BankScraper:
                 
                 if scraped_data:
                     if self.save_bank_data(bank_name, scraped_data):
-                        self.progress_manager.mark_completed(bank_name)
+                        self.progress_manager.mark_completed(bank_name, bank_date_info_for_progress)
                         success_status = True
                     else:
-                        self.progress_manager.mark_failed(bank_name)
+                        self.progress_manager.mark_failed(bank_name) 
                 else:
-                    self.progress_manager.mark_failed(bank_name)
+                    self.progress_manager.mark_failed(bank_name) 
                 
-                return bank_name, success_status
+                return bank_name, success_status, bank_date_info_for_progress
 
-            except TimeoutError as te: # get_driver 타임아웃
+            except TimeoutError as te:
                 logger.error(f"[{bank_name}] 드라이버 획득 타임아웃: {te}")
                 self.progress_manager.mark_failed(bank_name)
-                return bank_name, False
+                return bank_name, False, bank_date_info_for_progress
             except Exception as e_worker:
                 logger.error(f"[{bank_name}] 작업자 내부에서 치명적 예외: {e_worker}", exc_info=True)
                 self.progress_manager.mark_failed(bank_name)
-                return bank_name, False
+                return bank_name, False, bank_date_info_for_progress
             finally:
                 if driver:
                     logger.debug(f"[{bank_name}] 작업 완료, 드라이버 반납 시도.")
                     await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.return_driver, driver)
                 if pbar_instance: pbar_instance.update(1)
-                logger.info(f"[{bank_name}] 처리 결과: {'성공' if success_status else '실패'}")
-                logger.debug(f"[{bank_name}] Semaphore 반납.") # async with 구문이 자동으로 처리
+                final_log_date = bank_date_info_for_progress if bank_date_info_for_progress else "날짜 정보 미확정"
+                logger.info(f"[{bank_name}] 처리 결과: {'성공' if success_status else '실패'}{f' (공시일: {final_log_date})' if success_status else ''}")
+                logger.debug(f"[{bank_name}] Semaphore 반납.")
     
     async def run(self):
         start_time_total = time.monotonic()
@@ -732,43 +716,35 @@ class BankScraper:
         pending_banks = self.progress_manager.get_pending_banks()
         if not pending_banks:
             logger.info("처리할 은행이 없습니다. (이미 완료되었거나 목록이 비어있음)")
-            self.generate_summary_and_send_email() # 요약 및 이메일은 실행
+            self.generate_summary_and_send_email() 
             return
 
         logger.info(f"총 {len(pending_banks)}개 은행 처리 예정. (샘플: {pending_banks[:3]}{'...' if len(pending_banks)>3 else ''})")
-
         semaphore = asyncio.Semaphore(self.config.MAX_WORKERS)
-        
         tasks = []
         with tqdm(total=len(pending_banks), desc="은행 데이터 스크래핑", unit="은행", dynamic_ncols=True, smoothing=0.1) as pbar:
             for bank_name in pending_banks:
-                # worker_process_bank에 semaphore 직접 전달 대신 wrapper 사용 가능하나, 여기선 직접 전달.
-                # 또는 sem_task_wrapper를 정의하여 사용:
-                # tasks.append(sem_task_wrapper(bank_name, pbar, semaphore))
-                tasks.append(self.worker_process_bank(bank_name, pbar, semaphore)) # pbar와 semaphore 전달
+                tasks.append(self.worker_process_bank(bank_name, pbar, semaphore))
             
             results_or_exceptions = await asyncio.gather(*tasks, return_exceptions=True)
 
-        successful_runs = 0
-        failed_runs = 0
+        # 결과 로깅 (주로 디버깅 및 확인용, 최종 집계는 progress_manager에서)
+        temp_successful_runs = 0
+        temp_failed_runs = 0
         for i, res_or_exc in enumerate(results_or_exceptions):
             bank_name_processed = pending_banks[i] 
             if isinstance(res_or_exc, Exception):
                 logger.error(f"[{bank_name_processed}] 작업 실행 중 최상위 예외 포착: {res_or_exc}", exc_info=True)
-                if not (bank_name_processed in self.progress_manager.progress.get('completed', [])): # 아직 성공 처리 안됐다면 실패로
-                    self.progress_manager.mark_failed(bank_name_processed)
-                failed_runs +=1
-            elif isinstance(res_or_exc, tuple) and len(res_or_exc) == 2:
-                _, success_status = res_or_exc
-                if success_status: successful_runs +=1
-                else: failed_runs +=1
-            else: # 예상치 못한 결과 타입
+                temp_failed_runs +=1
+            elif isinstance(res_or_exc, tuple) and len(res_or_exc) == 3:
+                _, success_status, _ = res_or_exc # date_info는 이미 worker에서 로깅 및 저장
+                if success_status: temp_successful_runs +=1
+                else: temp_failed_runs +=1
+            else: 
                 logger.error(f"[{bank_name_processed}] 작업 결과가 예상치 않음: {res_or_exc}")
-                if not (bank_name_processed in self.progress_manager.progress.get('completed', [])):
-                    self.progress_manager.mark_failed(bank_name_processed)
-                failed_runs +=1
-        
-        logger.info(f"최종 집계: 성공 {successful_runs}건, 실패 {failed_runs}건 (예외 포함)")
+                temp_failed_runs +=1
+        logger.info(f"asyncio.gather 결과 임시 집계: 성공 {temp_successful_runs}건, 실패 {temp_failed_runs}건 (예외 포함)")
+
 
         end_time_total = time.monotonic()
         total_duration_sec = end_time_total - start_time_total
@@ -779,25 +755,38 @@ class BankScraper:
     def generate_summary_and_send_email(self):
         logger.info("요약 보고서 생성 및 이메일 전송 시작...")
         summary_data = []
-        all_banks_in_config = self.config.BANKS # 설정된 전체 은행 목록 기준
-        completed_banks_set = set(self.progress_manager.progress.get('completed', []))
-        failed_banks_set = set(self.progress_manager.progress.get('failed', []))
+        all_banks_in_config = self.config.BANKS
+        
+        processed_banks_data = self.progress_manager.progress.get('banks', {})
+        completed_count = 0
+        failed_count = 0
+        failed_banks_names = []
 
-        for bank in all_banks_in_config:
+        for bank_name_iter in all_banks_in_config:
+            bank_detail = processed_banks_data.get(bank_name_iter)
             status = '미처리'
-            # 생성된 파일명 패턴으로 파일 검색
-            # 파일명에 날짜가 포함되므로 glob 사용
-            bank_files = list(self.config.output_dir.glob(f"{bank}_*.xlsx"))
-            file_exists = bool(bank_files)
+            disclosure_date_val = '' 
+
+            if bank_detail:
+                current_status = bank_detail.get('status')
+                date_from_progress = bank_detail.get('date_info', '날짜 없음')
+
+                if current_status == 'completed':
+                    status = '완료'
+                    disclosure_date_val = date_from_progress
+                    completed_count +=1
+                elif current_status == 'failed':
+                    status = '실패'
+                    disclosure_date_val = date_from_progress if date_from_progress != '날짜 없음' else '' # 실패했어도 이전 날짜 정보가 있다면 표시
+                    failed_count +=1
+                    failed_banks_names.append(bank_name_iter)
             
-            if bank in completed_banks_set:
-                status = '완료'
-            elif bank in failed_banks_set:
-                status = '실패'
-            elif file_exists: # 완료도 실패도 아니지만 파일이 존재 (이전 실행 등)
-                status = '파일있음 (상태 불명확)'
-            
-            summary_data.append({'은행명': bank, '처리 상태': status, '확인 시간': datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+            summary_data.append({
+                '은행명': bank_name_iter, 
+                '공시 날짜': disclosure_date_val, 
+                '처리 상태': status, 
+                '확인 시간': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
         
         summary_df = pd.DataFrame(summary_data)
         summary_filename = f"스크래핑_요약_{self.config.today}.xlsx"
@@ -807,41 +796,32 @@ class BankScraper:
             logger.info(f"요약 보고서 생성 완료: {summary_file_path}")
         except Exception as e:
             logger.error(f"요약 보고서 저장 실패: {e}", exc_info=True)
-            # 요약 보고서 저장 실패 시 이메일 발송은 계속 진행하되, 첨부는 못할 수 있음
 
-        # 결과 압축 (output_dir의 부모 디렉토리에 zip 생성)
         zip_filename = f"저축은행_데이터_{self.config.today}.zip"
         zip_file_path = self.config.output_dir.parent / zip_filename 
         try:
             logger.info(f"결과 압축 시작: {self.config.output_dir} -> {zip_file_path}")
             with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # output_dir 자체를 arcname으로 하여 내부 파일들이 상대경로로 들어가도록 함
                 for file_path in self.config.output_dir.rglob('*'):
                     if file_path.is_file():
-                        # zip 파일 내 경로: '저축은행_데이터_YYYYMMDD/실제파일명.xlsx' 형태
                         arcname = file_path.relative_to(self.config.output_dir.parent)
                         zipf.write(file_path, arcname)
             logger.info(f"결과 압축 완료: {zip_file_path}")
         except Exception as e:
             logger.error(f"결과 압축 실패: {e}", exc_info=True)
-            zip_file_path = None # 압축 실패 시 None
+            zip_file_path = None 
 
-        # 이메일 본문 생성
-        completed_count = len(completed_banks_set)
-        failed_count = len(failed_banks_set)
         total_banks_in_list = len(all_banks_in_config)
-        # 처리 시도된 은행 수 (pending_banks 기준이 더 정확할 수 있으나, 여기서는 완료/실패 기준)
-        processed_attempt_count = completed_count + failed_count 
+        processed_attempt_count = completed_count + failed_count # 미처리는 제외
         success_rate = (completed_count / processed_attempt_count * 100) if processed_attempt_count > 0 else 0
         
-        email_subject = f"[저축은행 데이터] {self.config.today} 스크래핑 결과 ({completed_count}/{total_banks_in_list} 성공, 성공률 {success_rate:.1f}%)"
+        email_subject = f"[저축은행 데이터] {self.config.today} 스크래핑 결과 ({completed_count}/{total_banks_in_list} 완료, {failed_count} 실패)"
         
-        # 실패한 은행 목록 (최대 10개)
-        failed_banks_display = list(failed_banks_set)[:10]
-        failed_banks_html = "<ul>" + "".join(f"<li>{b}</li>" for b in failed_banks_display) + "</ul>"
-        if len(failed_banks_set) > 10:
-            failed_banks_html += f"<p>...외 {len(failed_banks_set) - 10}개 은행 실패.</p>"
-        if not failed_banks_set:
+        failed_banks_display_list = failed_banks_names[:10]
+        failed_banks_html = "<ul>" + "".join(f"<li>{b}</li>" for b in failed_banks_display_list) + "</ul>"
+        if len(failed_banks_names) > 10:
+            failed_banks_html += f"<p>...외 {len(failed_banks_names) - 10}개 은행 실패.</p>"
+        if not failed_banks_names:
             failed_banks_html = "<p>없음</p>"
 
         body_html = f"""
@@ -852,14 +832,14 @@ class BankScraper:
             .summary-box p {{ margin: 5px 0; }}
             .status-completed {{ color: green; font-weight: bold; }}
             .status-failed {{ color: red; font-weight: bold; }}
-            table {{ border-collapse: collapse; width: 80%; margin-top:15px; }}
-            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            table {{ border-collapse: collapse; width: 90%; margin-top:15px; font-size: 0.9em; }}
+            th, td {{ border: 1px solid #ddd; padding: 6px; text-align: left; }}
             th {{ background-color: #f0f0f0; }}
         </style></head><body>
         <h2>저축은행 데이터 스크래핑 결과 ({self.config.today})</h2>
         <div class="summary-box">
             <p><strong>총 대상 은행 수:</strong> {total_banks_in_list}개</p>
-            <p><strong>처리 시도된 은행 수:</strong> {processed_attempt_count}개</p>
+            <p><strong>처리 시도된 은행 수 (성공+실패):</strong> {processed_attempt_count}개</p>
             <p><span class="status-completed">✅ 성공:</span> {completed_count}개</p>
             <p><span class="status-failed">❌ 실패:</span> {failed_count}개</p>
             <p><strong>📈 성공률 (처리 시도된 은행 기준):</strong> {success_rate:.1f}%</p>
@@ -868,15 +848,16 @@ class BankScraper:
         <h3>실패한 은행 목록 (최대 10개):</h3>
         {failed_banks_html}
         <p>세부 결과는 첨부된 요약 보고서(엑셀) 및 전체 데이터(ZIP)를 확인하세요.</p>
+        <h3>전체 은행 처리 현황 (공시 날짜 포함):</h3>
+        {summary_df.to_html(index=False, border=1, na_rep='') if not summary_df.empty else "<p>요약 테이블 데이터가 없습니다.</p>"}
         <br><p><small>이 메일은 자동 발송되었습니다. (스크래퍼 버전: {self.config.VERSION})</small></p>
-        {summary_df.to_html(index=False, border=1) if not summary_df.empty else "<p>요약 테이블 데이터가 없습니다.</p>"}
         </body></html>
         """
         
         attachment_to_send = None
         if zip_file_path and zip_file_path.exists():
             attachment_to_send = str(zip_file_path)
-        elif summary_file_path.exists(): # ZIP 실패 시 요약파일이라도 첨부
+        elif summary_file_path.exists(): 
             logger.warning("압축 파일 생성 실패. 요약 보고서만 첨부합니다.")
             attachment_to_send = str(summary_file_path)
         else:
@@ -886,38 +867,22 @@ class BankScraper:
 
 # --- 메인 실행 로직 ---
 def main():
-    # argparse는 GitHub Actions에서 환경변수로 설정을 주로 하므로, 여기서는 기본값 사용
-    # parser = argparse.ArgumentParser(description='저축은행 중앙회 데이터 스크래퍼')
-    # args = parser.parse_args()
-
-    config = Config() # Config 초기화 시 logger도 전역으로 설정됨
-    
-    # EmailSender 인스턴스는 logger가 설정된 후 생성되어야 경고 메시지 정상 출력
-    # BankScraper 내에서 생성하도록 변경
-
-    driver_manager = None # finally 블록에서 사용하기 위해 미리 선언
+    config = Config() 
+    driver_manager = None 
     try:
-        # 로거가 설정된 이후 주요 작업 시작
         logger.info(f"스크립트 실행 시작: {sys.argv[0]}")
-
         driver_manager = DriverManager(config)
         progress_manager = ProgressManager(config)
         scraper = BankScraper(config, driver_manager, progress_manager)
-        
-        asyncio.run(scraper.run()) # 비동기 메인 실행
-        
+        asyncio.run(scraper.run()) 
         logger.info("모든 스크래핑 프로세스가 정상적으로 완료되었습니다.")
-
     except Exception as e:
-        # logger가 설정되지 않았을 경우를 대비하여 print도 사용
         print(f"스크립트 실행 중 최상위 레벨에서 오류 발생: {e}")
         if logger:
             logger.critical(f"스크립트 실행 중 최상위 레벨에서 오류 발생: {e}", exc_info=True)
-        sys.exit(1) # 오류 발생 시 비정상 종료
+        sys.exit(1) 
     finally:
         if driver_manager:
-            # 프로그램 종료 전 모든 드라이버 정리
-            # asyncio 이벤트 루프가 이미 닫혔을 수 있으므로 동기적으로 실행
             logger.info("애플리케이션 종료 전 드라이버 풀 정리 시도...")
             driver_manager.quit_all() 
         if logger:
@@ -926,7 +891,7 @@ def main():
             print("스크립트 실행이 종료되었습니다 (로거 미설정).")
 
 if __name__ == "__main__":
-    # Python 3.8+ for Windows에서 asyncio 관련 ProactorEventLoop 사용 시 발생하는 오류 방지 (필요시)
+    # Windows에서 Python 3.8+ asyncio 관련 ProactorEventLoop 오류 방지 (필요시 주석 해제)
     # if sys.platform == "win32" and sys.version_info >= (3, 8):
-    #    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     main()

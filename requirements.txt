@@ -1,7 +1,8 @@
-selenium==4.18.1
-pandas==2.0.3
-numpy==1.24.4  # pandas 2.0.3과 호환되는 numpy 버전 명시
-beautifulsoup4==4.12.3
-openpyxl==3.1.2
-lxml==5.1.0
-# webdriver-manager==4.0.1 # 주석 처리됨 (현재 코드에서 직접 사용 안 함)
+# requirements.txt
+selenium>=4.10
+pandas>=2.0.0
+numpy>=1.24.4 # 이전 NumPy/Pandas 호환성 오류 해결을 위해 명시된 버전
+beautifulsoup4
+openpyxl
+lxml
+tqdm  # <--- 이 줄을 추가합니다.

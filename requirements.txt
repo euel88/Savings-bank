@@ -1,9 +1,16 @@
-# requirements.txt
-selenium>=4.10
-pandas>=2.0.0
-numpy>=1.24.4
-beautifulsoup4
-openpyxl
-lxml
-tqdm
-html5lib  # <--- 이 줄을 추가합니다.
+# Selenium 및 웹드라이버 관련
+selenium==4.18.1
+webdriver-manager==4.0.1
+
+# 데이터 처리 및 파싱
+pandas==2.0.3
+beautifulsoup4==4.12.3
+openpyxl==3.1.2
+lxml==5.1.0
+html5lib==1.1
+
+# 진행률 표시
+tqdm==4.66.1
+
+# 기타 유틸리티 (Python 표준 라이브러리에 포함되지 않은 것들)
+# asyncio, smtplib, email 등은 Python 표준 라이브러리에 포함되어 있음

@@ -2,32 +2,30 @@ name: 저축은행 데이터 스크래핑
 
 # 실행 조건 설정
 on:
-  # 수동 실행 가능
   workflow_dispatch:
-
-  # 정기 실행
   schedule:
-    # 5월, 8월, 11월의 20-31일 사이, 아래 지정된 UTC 시간에 실행
-    # (KST 기준 오전 9시부터 오후 6시까지 매시간)
     - cron: '0 0 20-31 5,8,11 *'  # 00:00 UTC (09:00 KST)
     - cron: '0 1 20-31 5,8,11 *'  # 01:00 UTC (10:00 KST)
-    - cron: '0 2 20-31 5,8,11 *'  # 02:00 UTC (11:00 KST)
-    - cron: '0 3 20-31 5,8,11 *'  # 03:00 UTC (12:00 KST)
-    - cron: '0 4 20-31 5,8,11 *'  # 04:00 UTC (13:00 KST)
-    - cron: '0 5 20-31 5,8,11 *'  # 05:00 UTC (14:00 KST)
-    - cron: '0 6 20-31 5,8,11 *'  # 06:00 UTC (15:00 KST)
-    - cron: '0 7 20-31 5,8,11 *'  # 07:00 UTC (16:00 KST)
-    - cron: '0 8 20-31 5,8,11 *'  # 08:00 UTC (17:00 KST)
+    # ... (기존 cron 설정 유지) ...
     - cron: '0 9 20-31 5,8,11 *'  # 09:00 UTC (18:00 KST)
 
-# 환경 변수 설정 (변경 없음)
+# --- 추가된 부분: 워크플로우 전체에 권한 부여 ---
+permissions:
+  contents: write  # 릴리즈 생성, 태그 생성 등에 필요
+  # actions: read # (선택 사항, 기본값)
+  # packages: write # (선택 사항, GitHub Packages에 푸시할 경우)
+
+# 환경 변수 설정
 env:
-  TZ: 'Asia/Seoul' # 한국 시간대 설정
+  TZ: 'Asia/Seoul'
   PYTHON_VERSION: '3.9'
 
 jobs:
   check-and-scrape:
     runs-on: ubuntu-latest
+    # --- 또는 job 레벨에서 권한 부여 가능 ---
+    # permissions:
+    #   contents: write
 
     steps:
     # 1. 코드 체크아웃 (변경 없음)
@@ -40,7 +38,7 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    # 3. 마지막 평일 및 실행 시간 확인 (Python 스크립트 수정)
+    # 3. 마지막 평일 및 실행 시간 확인 (이전 답변의 Python 스크립트 사용)
     - name: 마지막 평일 및 실행 시간 확인
       id: check-date
       run: |
@@ -50,39 +48,34 @@ jobs:
         import sys
         import os
 
-        # 한국 시간 기준 현재 날짜 및 시간 (TZ env var 덕분에 KST로 동작)
         now_kst = datetime.datetime.now()
         year = now_kst.year
         month = now_kst.month
         day = now_kst.day
-        hour_kst = now_kst.hour # 현재 KST 시간 (0-23)
+        hour_kst = now_kst.hour
 
-        should_run_final = "false" # 최종 실행 여부 플래그
+        should_run_final = "false"
 
-        # 1. 대상 월인지 확인
         if month not in [5, 8, 11]:
             print(f"대상 월({month}월)이 아닙니다.")
         else:
-            # 2. 해당 월의 마지막 평일인지 확인
             last_day_of_month_num = calendar.monthrange(year, month)[1]
             actual_last_weekday_day_num = -1
             for d_loop_num in range(last_day_of_month_num, 0, -1):
                 date_to_check_loop = datetime.date(year, month, d_loop_num)
-                if date_to_check_loop.weekday() < 5: # 월요일(0) ~ 금요일(4)
+                if date_to_check_loop.weekday() < 5:
                     actual_last_weekday_day_num = d_loop_num
                     break
             
             if day != actual_last_weekday_day_num:
                 print(f"오늘({year}-{month}-{day})은 마지막 평일(해당 월 {actual_last_weekday_day_num}일)이 아닙니다.")
             else:
-                # 3. 대상 시간대인지 확인 (KST 9시 <= 현재시간 <= 18시)
                 if not (9 <= hour_kst <= 18):
                     print(f"현재 시간({hour_kst}시 KST)이 대상 실행 시간대(09시-18시)가 아닙니다.")
                 else:
                     print(f"실행 조건 충족: 마지막 평일({year}-{month}-{day})이며, 실행 시간대({hour_kst}시 KST)입니다.")
                     should_run_final = "true"
         
-        # GITHUB_OUTPUT 환경 변수에 결과 쓰기
         github_output_file = os.getenv('GITHUB_OUTPUT')
         if github_output_file:
             with open(github_output_file, 'a') as f:
@@ -90,33 +83,32 @@ jobs:
             print(f"Set GITHUB_OUTPUT: should_run={should_run_final}")
         else:
             print(f"Warning: GITHUB_OUTPUT not set. Would have set: should_run={should_run_final}")
-
         EOF
         )
         python -c "$python_code"
-        # 만약 should_run_final이 "false"이고, 수동 실행이 아니라면, 이 스텝 이후는 실행되지 않도록 할 수 있지만,
-        # 각 스텝의 if 조건에서 처리하는 것이 더 명확합니다.
 
-    # 4. Google Chrome 설치 (이하 스텝들의 if 조건은 변경 없음)
+    # 4. Google Chrome 설치 (변경 없음)
     - name: Google Chrome 설치
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      # ... (run 스크립트 내용) ...
       run: |
         sudo apt-get update
         sudo apt-get install -y google-chrome-stable
         google-chrome --version
 
-    # 5. 의존성 설치
+    # 5. 의존성 설치 (변경 없음, `requirements.txt` 에 `numpy` 버전 명시 권장)
     - name: 의존성 설치
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      # ... (run 스크립트 내용) ...
       run: |
         python -m pip install --upgrade pip
         pip install --no-cache-dir --force-reinstall -r requirements.txt
 
-    # 6. 스크래핑 실행
+    # 6. 스크래핑 실행 (변경 없음)
     - name: 스크래핑 실행
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        python bank_scraper_headless.py
+      # ... (run 스크립트 내용 및 env 설정) ...
+      run: python bank_scraper_headless.py
       env:
         MAX_WORKERS: 2
         MAX_RETRIES: 3
@@ -125,35 +117,38 @@ jobs:
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
 
-    # 7. 결과 파일 업로드
+    # 7. 결과 파일 업로드 (변경 없음)
     - name: 결과 파일 업로드
       if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && (success() || failure())
+      # ... (uses, with, env 설정) ...
       uses: actions/upload-artifact@v4
       with:
-        name: 저축은행-데이터-${{ env.TZ_DATE }}-${{ github.run_number }}
+        name: 저축은행-데이터-${{ env.TZ_DATE_ARTIFACT }}-${{ github.run_number }} # 변수명 수정
         path: |
           output/
           *.zip
-          scraping.log
+          scraping.log # Python 스크립트에서 scraping_log_YYYYMMDD.log 로 생성됨, 경로 확인 필요
         retention-days: 90
       env:
-        TZ_DATE: $(date +%Y%m%d-%H%M) # 업로드 시점의 날짜 및 시간 (TZ 환경변수 따름)
+        TZ_DATE_ARTIFACT: $(date +%Y%m%d-%H%M) # 아티팩트 이름용 변수
 
-    # 8. 릴리즈 생성
+    # 8. 릴리즈 생성 (수정됨)
     - name: 릴리즈 생성
       if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && success()
       uses: softprops/action-gh-release@v2
+      env: # 이 스텝에서 사용할 환경 변수 정의
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_TAG_NAME: data-v$(date +%Y%m%d-%H%M)-${{ github.run_number }}
+        RELEASE_NAME: 저축은행 데이터 $(date +%Y%m%d-%H%M) (Build ${{ github.run_number }})
+        RELEASE_BODY_CREATED_AT: $(date '+%Y-%m-%d %H:%M:%S %Z')
       with:
-        tag_name: data-v${{ env.TZ_DATE_TAG }}-${{ github.run_number }}
-        name: 저축은행 데이터 ${{ env.TZ_DATE_TAG }} (Build ${{ github.run_number }})
+        tag_name: ${{ env.RELEASE_TAG_NAME }}
+        name: ${{ env.RELEASE_NAME }}
         body: |
           자동 생성된 저축은행 데이터입니다.
-          생성 시간 (KST): $(date '+%Y-%m-%d %H:%M:%S %Z')
+          생성 시간 (KST): ${{ env.RELEASE_BODY_CREATED_AT }}
         files: |
-          *.zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TZ_DATE_TAG: $(date +%Y%m%d-%H%M) # 릴리즈 태그용 날짜 및 시간
+          *.zip # 워크플로우 작업 디렉토리 루트의 모든 .zip 파일
 
     # 9. 실패 알림 (변경 없음)
     - name: 실패 알림

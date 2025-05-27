@@ -16,12 +16,15 @@ on:
     - cron: '0 8 20-31 5,8,11 *'  # 08:00 UTC (17:00 KST)
     - cron: '0 9 20-31 5,8,11 *'  # 09:00 UTC (18:00 KST)
 
-permissions: # 릴리즈 생성 권한 추가
-  contents: write
+permissions:
+  contents: write  # 릴리즈 생성 및 태그 푸시 권한
 
 env:
-  TZ: 'Asia/Seoul' # 한국 시간대 설정
+  TZ: 'Asia/Seoul' # 전체 워크플로우에 한국 시간대 적용
   PYTHON_VERSION: '3.9'
+  # 파이썬 스크립트에서 생성하는 ZIP 파일 이름의 기본 패턴 (날짜 부분은 아래에서 동적으로 생성)
+  # 예: 저축은행_데이터_20250528.zip
+  PYTHON_SCRIPT_ZIP_FILENAME_BASE: "저축은행_데이터"
 
 jobs:
   check-and-scrape:
@@ -38,7 +41,7 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    # 3. 마지막 평일 및 실행 시간 확인
+    # 3. 마지막 평일 및 실행 시간 확인 (Python 스크립트 사용)
     - name: 마지막 평일 및 실행 시간 확인
       id: check-date
       run: |
@@ -48,7 +51,7 @@ jobs:
         import sys
         import os
 
-        now_kst = datetime.datetime.now()
+        now_kst = datetime.datetime.now() # TZ 환경변수로 인해 KST로 동작
         year = now_kst.year
         month = now_kst.month
         day = now_kst.day
@@ -63,7 +66,7 @@ jobs:
             actual_last_weekday_day_num = -1
             for d_loop_num in range(last_day_of_month_num, 0, -1):
                 date_to_check_loop = datetime.date(year, month, d_loop_num)
-                if date_to_check_loop.weekday() < 5:
+                if date_to_check_loop.weekday() < 5: # 월(0) ~ 금(4)
                     actual_last_weekday_day_num = d_loop_num
                     break
             
@@ -91,7 +94,7 @@ jobs:
     - name: Google Chrome 설치
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
       run: |
-        sudo apt-get update
+        sudo apt-get update -qq
         sudo apt-get install -y google-chrome-stable
         google-chrome --version
 
@@ -100,53 +103,71 @@ jobs:
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         python -m pip install --upgrade pip
+        # NumPy를 먼저, 특정 버전으로, 캐시 없이, 강제 재설치
+        pip install --no-cache-dir --force-reinstall numpy==1.24.4 
+        # 그 다음 나머지 requirements.txt 의존성을 설치 (pandas 포함)
         pip install --no-cache-dir --force-reinstall -r requirements.txt
 
     # 6. 스크래핑 실행
     - name: 스크래핑 실행
       if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      run: python bank_scraper_headless.py # 스크립트 파일명 확인
+      run: python bank_scraper_headless.py # 실제 파이썬 스크립트 파일명으로 변경
       env:
-        MAX_WORKERS: 2 # GitHub Actions 환경에 맞게 조정
-        MAX_RETRIES: 3
-        PAGE_LOAD_TIMEOUT: 45
+        MAX_WORKERS: 2 # GitHub Actions 환경에서는 CPU 코어 수를 고려하여 적절히 조절
+        MAX_RETRIES: 2 # 재시도 횟수
+        PAGE_LOAD_TIMEOUT: 25 # 페이지 로드 타임아웃 (초)
+        WAIT_TIMEOUT: 15 # 요소 대기 타임아웃 (초)
+        # GitHub Secrets에서 가져올 환경 변수들
         GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
+        # LOG_LEVEL: INFO # 파이썬 스크립트의 Config에서 기본값 INFO 사용
 
     # 7. 결과 파일 업로드
     - name: 결과 파일 업로드
+      # 스크래핑 실행 조건과 동일하게 + 성공/실패 여부와 관계없이 아티팩트 업로드 (로그 확인용)
       if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && (success() || failure())
       uses: actions/upload-artifact@v4
+      env: # 이 스텝에서 사용할 환경변수
+          TODAY_KST_ARTIFACT: $(date +%Y%m%d-%H%M) # 아티팩트 이름에 사용할 KST 날짜-시간
+          # 파이썬 스크립트가 생성할 zip 파일 이름 (날짜 부분은 동적)
+          EXPECTED_ZIP_FILENAME: "${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d).zip"
       with:
-        name: 저축은행-데이터-${{ env.TZ_DATE_ARTIFACT }}-${{ github.run_number }}
+        name: 저축은행-데이터-${{ env.TODAY_KST_ARTIFACT }}-${{ github.run_number }}
         path: |
-          output/  # 스크립트에서 output 폴더에 모든 결과물(로그, 엑셀) 저장
-          *.zip    # 루트에 생성된 zip 파일
-        retention-days: 90
-      env:
-        TZ_DATE_ARTIFACT: $(date +%Y%m%d-%H%M)
+          output/                     # output 폴더 전체 (엑셀, 로그 등 포함)
+          ${{ env.EXPECTED_ZIP_FILENAME }} # 스크립트가 루트에 생성한 zip 파일
+        retention-days: 30 # 아티팩트 보관 기간
 
     # 8. 릴리즈 생성
     - name: 릴리즈 생성
+      # 스크래핑 실행 조건과 동일하게 + 성공했을 때만 릴리즈 생성
       if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && success()
       uses: softprops/action-gh-release@v2
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        RELEASE_TAG_NAME: data-v$(date +%Y%m%d-%H%M)-${{ github.run_number }}
-        RELEASE_NAME: "저축은행 데이터 $(date +%Y%m%d-%H%M) (Build ${{ github.run_number }})"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 액션 내부에서 GITHUB_TOKEN 사용
+        # 릴리즈 정보에 사용할 동적 값들을 이 스텝의 환경 변수로 정의
+        RELEASE_DATETIME_TAG: $(date +%Y%m%d-%H%M)
+        RELEASE_DATETIME_TITLE: $(date +%Y%m%d-%H%M)
         RELEASE_BODY_CREATED_AT: $(date '+%Y-%m-%d %H:%M:%S %Z')
+        # 파이썬 스크립트에서 생성하는 zip 파일 이름과 동일하게 설정
+        GENERATED_ZIP_FILE: "${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d).zip"
       with:
-        tag_name: ${{ env.RELEASE_TAG_NAME }}
-        name: ${{ env.RELEASE_NAME }}
+        tag_name: data-v${{ env.RELEASE_DATETIME_TAG }}-${{ github.run_number }}
+        name: "저축은행 데이터 ${{ env.RELEASE_DATETIME_TITLE }} (빌드 #${{ github.run_number }})"
         body: |
           자동 생성된 저축은행 데이터입니다.
           생성 시간 (KST): ${{ env.RELEASE_BODY_CREATED_AT }}
+          데이터는 아래 첨부된 ZIP 파일을 확인하세요.
         files: |
-          *.zip
+          ${{ env.GENERATED_ZIP_FILE }} # 정확한 ZIP 파일 이름 참조
+          output/스크래핑_요약_*.xlsx # 요약 엑셀 파일도 첨부 (선택적)
+          # output/**/scraping_log_*.log # 로그 파일도 첨부 (선택적, 경로 주의)
 
     # 9. 실패 알림
     - name: 실패 알림
+      # 스크래핑 실행 조건과 동일하게 + 실패했을 때만 알림
       if: failure() && (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch')
       run: |
-        echo "스크래핑 실패! 워크플로우 로그 및 업로드된 로그 파일을 확인하세요."
+        echo "‼️ 스크래핑 작업 실패! 워크플로우 로그 및 업로드된 아티팩트의 로그 파일을 확인하세요."
+        # 필요한 경우 여기에 Slack 또는 다른 알림 서비스 연동

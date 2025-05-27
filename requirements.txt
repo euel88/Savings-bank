@@ -1,8 +1,9 @@
 # requirements.txt
 selenium>=4.10
 pandas>=2.0.0
-numpy>=1.24.4 # 이전 NumPy/Pandas 호환성 오류 해결을 위해 명시된 버전
+numpy>=1.24.4
 beautifulsoup4
 openpyxl
 lxml
-tqdm  # <--- 이 줄을 추가합니다.
+tqdm
+html5lib  # <--- 이 줄을 추가합니다.

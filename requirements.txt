@@ -1,7 +1,7 @@
-# requirements.txt (webdriver-manager가 코드에서 사용되지 않는 경우)
 selenium==4.18.1
 pandas==2.0.3
+numpy==1.24.4  # pandas 2.0.3과 호환되는 numpy 버전 명시
 beautifulsoup4==4.12.3
 openpyxl==3.1.2
 lxml==5.1.0
-# webdriver-manager==4.0.1 # 코드에서 사용하지 않으면 제거 또는 주석 처리
+# webdriver-manager==4.0.1 # 주석 처리됨 (현재 코드에서 직접 사용 안 함)

@@ -22,9 +22,11 @@ permissions:
 env:
   TZ: 'Asia/Seoul' # 전체 워크플로우에 한국 시간대 적용
   PYTHON_VERSION: '3.9'
-  # 파이썬 스크립트에서 생성하는 ZIP 파일 이름의 기본 패턴 (날짜 부분은 아래에서 동적으로 생성)
-  # 예: 저축은행_데이터_20250528.zip
   PYTHON_SCRIPT_ZIP_FILENAME_BASE: "저축은행_데이터"
+  # Python 스크립트가 사용할 기본 출력 디렉토리 (루트 기준)
+  # 스크립트는 이 디렉토리 내에 "저축은행_데이터_YYYYMMDD" 형태의 하위 폴더를 생성하고,
+  # ZIP 파일은 이 디렉토리 바로 아래에 생성합니다. (예: output/저축은행_데이터_YYYYMMDD.zip)
+  OUTPUT_BASE_DIR_NAME: "output"
 
 jobs:
   check-and-scrape:
@@ -41,9 +43,21 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    # 3. 마지막 평일 및 실행 시간 확인 (Python 스크립트 사용)
+    # 3. 동적 환경 변수 준비 (날짜, 파일명 등)
+    - name: 동적 환경 변수 준비
+      id: prep_vars
+      run: |
+        echo "TODAY_YMD=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+        echo "DATETIME_TAG_PART=$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+        echo "DATETIME_KST_FULL=$(date '+%Y-%m-%d %H:%M:%S %Z')" >> $GITHUB_OUTPUT
+        echo "EXPECTED_ZIP_FILENAME=${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d).zip" >> $GITHUB_OUTPUT
+        echo "EXPECTED_SUMMARY_FILENAME=스크래핑_요약_$(date +%Y%m%d).xlsx" >> $GITHUB_OUTPUT
+        echo "EXPECTED_LOG_FILENAME=scraping_log_$(date +%Y%m%d).log" >> $GITHUB_OUTPUT
+        echo "DYNAMIC_OUTPUT_SUBDIR_NAME=${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+
+    # 4. 마지막 평일 및 실행 시간 확인 (Python 스크립트 사용)
     - name: 마지막 평일 및 실행 시간 확인
-      id: check-date
+      id: check_date # 스텝 ID 변경 (하이픈 권장)
       run: |
         python_code=$(cat <<EOF
         import datetime
@@ -59,6 +73,7 @@ jobs:
 
         should_run_final = "false"
 
+        # 실행 월 및 마지막 평일, 시간대 확인 로직 (기존과 동일)
         if month not in [5, 8, 11]:
             print(f"대상 월({month}월)이 아닙니다.")
         else:
@@ -90,84 +105,72 @@ jobs:
         )
         python -c "$python_code"
 
-    # 4. Google Chrome 설치
-    - name: Google Chrome 설치
-      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y google-chrome-stable
-        google-chrome --version
+    # 5. Chrome 및 ChromeDriver 설치
+    - name: Chrome 및 ChromeDriver 설치
+      if: steps.check_date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: stable # 안정적인 최신 버전 사용
 
-    # 5. 의존성 설치
+    # 6. 의존성 설치
     - name: 의존성 설치
-      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      if: steps.check_date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         python -m pip install --upgrade pip
-        # NumPy를 먼저, 특정 버전으로, 캐시 없이, 강제 재설치
+        # NumPy 및 requirements.txt 설치 (기존 방식 유지)
         pip install --no-cache-dir --force-reinstall numpy==1.24.4 
-        # 그 다음 나머지 requirements.txt 의존성을 설치 (pandas 포함)
         pip install --no-cache-dir --force-reinstall -r requirements.txt
 
-    # 6. 스크래핑 실행
+    # 7. 스크래핑 실행
     - name: 스크래핑 실행
-      if: steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
-      run: python bank_scraper_headless.py # 실제 파이썬 스크립트 파일명으로 변경
+      id: run_scraper # 스텝 ID 추가 (결과 확인용)
+      if: steps.check_date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch'
+      run: python bank_scraper_headless.py
       env:
-        MAX_WORKERS: 2 # GitHub Actions 환경에서는 CPU 코어 수를 고려하여 적절히 조절
-        MAX_RETRIES: 2 # 재시도 횟수
-        PAGE_LOAD_TIMEOUT: 25 # 페이지 로드 타임아웃 (초)
-        WAIT_TIMEOUT: 15 # 요소 대기 타임아웃 (초)
-        # GitHub Secrets에서 가져올 환경 변수들
+        OUTPUT_DIR: "./${{ env.OUTPUT_BASE_DIR_NAME }}" # Python 스크립트에 출력 기본 디렉토리 전달
+        MAX_WORKERS: 2
+        MAX_RETRIES: 2
+        PAGE_LOAD_TIMEOUT: 25
+        WAIT_TIMEOUT: 15
         GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         RECIPIENT_EMAILS: ${{ secrets.RECIPIENT_EMAILS }}
-        # LOG_LEVEL: INFO # 파이썬 스크립트의 Config에서 기본값 INFO 사용
 
-    # 7. 결과 파일 업로드
+    # 8. 결과 파일 업로드
     - name: 결과 파일 업로드
-      # 스크래핑 실행 조건과 동일하게 + 성공/실패 여부와 관계없이 아티팩트 업로드 (로그 확인용)
-      if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && (success() || failure())
+      if: always() # 성공/실패 관계없이 항상 실행 (로그 확인용)
       uses: actions/upload-artifact@v4
-      env: # 이 스텝에서 사용할 환경변수
-          TODAY_KST_ARTIFACT: $(date +%Y%m%d-%H%M) # 아티팩트 이름에 사용할 KST 날짜-시간
-          # 파이썬 스크립트가 생성할 zip 파일 이름 (날짜 부분은 동적)
-          EXPECTED_ZIP_FILENAME: "${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d).zip"
       with:
-        name: 저축은행-데이터-${{ env.TODAY_KST_ARTIFACT }}-${{ github.run_number }}
+        name: 저축은행-데이터-${{ steps.prep_vars.outputs.DATETIME_TAG_PART }}-${{ github.run_number }}
         path: |
-          output/                     # output 폴더 전체 (엑셀, 로그 등 포함)
-          ${{ env.EXPECTED_ZIP_FILENAME }} # 스크립트가 루트에 생성한 zip 파일
-        retention-days: 30 # 아티팩트 보관 기간
+          ${{ env.OUTPUT_BASE_DIR_NAME }}/ # output 폴더 전체 업로드
+          # Python 스크립트는 ZIP 파일을 OUTPUT_BASE_DIR_NAME 내부에 생성합니다.
+          # 예: output/저축은행_데이터_YYYYMMDD.zip
+          # 따라서 위 output/ 만으로도 ZIP 파일이 포함됩니다.
+          # 만약 ZIP 파일이 루트에 있다면 아래 주석 해제:
+          # ${{ steps.prep_vars.outputs.EXPECTED_ZIP_FILENAME }}
+        retention-days: 7 # 실패 시 디버깅을 위해 짧게 설정 가능
 
-    # 8. 릴리즈 생성
+    # 9. 릴리즈 생성
     - name: 릴리즈 생성
-      # 스크래핑 실행 조건과 동일하게 + 성공했을 때만 릴리즈 생성
-      if: (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && success()
+      if: (steps.check_date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && steps.run_scraper.outcome == 'success'
       uses: softprops/action-gh-release@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 액션 내부에서 GITHUB_TOKEN 사용
-        # 릴리즈 정보에 사용할 동적 값들을 이 스텝의 환경 변수로 정의
-        RELEASE_DATETIME_TAG: $(date +%Y%m%d-%H%M)
-        RELEASE_DATETIME_TITLE: $(date +%Y%m%d-%H%M)
-        RELEASE_BODY_CREATED_AT: $(date '+%Y-%m-%d %H:%M:%S %Z')
-        # 파이썬 스크립트에서 생성하는 zip 파일 이름과 동일하게 설정
-        GENERATED_ZIP_FILE: "${{ env.PYTHON_SCRIPT_ZIP_FILENAME_BASE }}_$(date +%Y%m%d).zip"
       with:
-        tag_name: data-v${{ env.RELEASE_DATETIME_TAG }}-${{ github.run_number }}
-        name: "저축은행 데이터 ${{ env.RELEASE_DATETIME_TITLE }} (빌드 #${{ github.run_number }})"
+        tag_name: data-v${{ steps.prep_vars.outputs.DATETIME_TAG_PART }}-${{ github.run_number }}
+        name: "저축은행 데이터 ${{ steps.prep_vars.outputs.DATETIME_TAG_PART }} (빌드 #${{ github.run_number }})"
         body: |
           자동 생성된 저축은행 데이터입니다.
-          생성 시간 (KST): ${{ env.RELEASE_BODY_CREATED_AT }}
+          생성 시간 (KST): ${{ steps.prep_vars.outputs.DATETIME_KST_FULL }}
           데이터는 아래 첨부된 ZIP 파일을 확인하세요.
         files: |
-          ${{ env.GENERATED_ZIP_FILE }} # 정확한 ZIP 파일 이름 참조
-          output/스크래핑_요약_*.xlsx # 요약 엑셀 파일도 첨부 (선택적)
-          # output/**/scraping_log_*.log # 로그 파일도 첨부 (선택적, 경로 주의)
+          ${{ env.OUTPUT_BASE_DIR_NAME }}/${{ steps.prep_vars.outputs.EXPECTED_ZIP_FILENAME }}
+          ${{ env.OUTPUT_BASE_DIR_NAME }}/${{ steps.prep_vars.outputs.DYNAMIC_OUTPUT_SUBDIR_NAME }}/${{ steps.prep_vars.outputs.EXPECTED_SUMMARY_FILENAME }}
+          ${{ env.OUTPUT_BASE_DIR_NAME }}/${{ steps.prep_vars.outputs.DYNAMIC_OUTPUT_SUBDIR_NAME }}/${{ steps.prep_vars.outputs.EXPECTED_LOG_FILENAME }}
+        token: ${{ secrets.GITHUB_TOKEN }} # 기본 제공 토큰 사용
 
-    # 9. 실패 알림
+    # 10. 실패 알림
     - name: 실패 알림
-      # 스크래핑 실행 조건과 동일하게 + 실패했을 때만 알림
-      if: failure() && (steps.check-date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch')
+      if: failure() && (steps.check_date.outputs.should_run == 'true' || github.event_name == 'workflow_dispatch') && steps.run_scraper.outcome == 'failure'
       run: |
         echo "‼️ 스크래핑 작업 실패! 워크플로우 로그 및 업로드된 아티팩트의 로그 파일을 확인하세요."
         # 필요한 경우 여기에 Slack 또는 다른 알림 서비스 연동

@@ -303,72 +303,192 @@ class ProgressManager:
 
 # --- Colab 기반 스크래핑 함수들 ---
 def extract_date_information(driver):
-    """날짜 정보 추출 (Colab 버전 기반)"""
+    """강화된 날짜 정보 추출 및 검증"""
     try:
+        # 1차 추출 시도
         js_script = """
-        var allText = document.body.innerText;
-        var match = allText.match(/\\d{4}년\\d{1,2}월말/);
-        return match ? match[0] : '';
+        var allMatches = [];
+        var datePattern = /(\d{4})년\s*(\d{1,2})월말/g;
+        var bodyText = document.body.innerText || "";
+        var match;
+        datePattern.lastIndex = 0;
+        
+        // 전체 텍스트에서 모든 날짜 패턴 추출
+        while ((match = datePattern.exec(bodyText)) !== null) {
+            allMatches.push({
+                fullText: match[0],
+                year: parseInt(match[1]),
+                month: parseInt(match[2])
+            });
+        }
+        
+        // 우선순위가 높은 태그에서 날짜 검색
+        var prioritySelectors = [
+            'h1', 'h2', 'h3', 'caption', 'th[colspan]', 
+            '.title', '.date', '#publishDate', '.disclosure-date'
+        ];
+        
+        for (var i = 0; i < prioritySelectors.length; i++) {
+            var elements;
+            try { elements = document.querySelectorAll(prioritySelectors[i]); }
+            catch(e) { continue; }
+            
+            for (var j = 0; j < elements.length; j++) {
+                var elText = elements[j].innerText || "";
+                if (elText.length > 500) elText = elText.substring(0, 500);
+                datePattern.lastIndex = 0;
+                
+                while ((match = datePattern.exec(elText)) !== null) {
+                    var year = parseInt(match[1]);
+                    var month = parseInt(match[2]);
+                    
+                    // 중복 제거
+                    if (!allMatches.some(m => m.year === year && m.month === month)) {
+                        allMatches.push({
+                            fullText: match[0],
+                            year: year,
+                            month: month,
+                            priority: true  // 우선순위 태그에서 추출됨
+                        });
+                    }
+                }
+            }
+        }
+        
+        return allMatches;
         """
-        date_text = driver.execute_script(js_script)
-
-        if date_text:
-            return date_text
-
-        # 추가 방법들
-        date_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '기말') and contains(text(), '년')]")
-        if date_elements:
-            for element in date_elements:
-                text = element.text
-                date_pattern = re.compile(r'\d{4}년\d{1,2}월말')
-                matches = date_pattern.findall(text)
-                if matches:
-                    return matches[0]
-
-        return "날짜 정보 없음"
+        
+        date_matches = driver.execute_script(js_script)
+        
+        if not date_matches:
+            return "날짜 정보 없음"
+        
+        # 날짜 검증 및 필터링
+        current_year = datetime.now().year
+        valid_dates = []
+        
+        for match in date_matches:
+            year = match.get('year', 0)
+            month = match.get('month', 0)
+            
+            # 합리적인 날짜 범위 검증 (현재년도 기준 -3년 ~ +1년, 분기말 월 우선)
+            if (current_year - 3) <= year <= (current_year + 1) and 1 <= month <= 12:
+                # 분기말 월(3, 6, 9, 12) 우선순위 부여
+                priority_score = 0
+                if month in [3, 6, 9, 12]:
+                    priority_score += 10
+                if match.get('priority'):  # 우선순위 태그에서 추출
+                    priority_score += 5
+                if year >= current_year - 1:  # 최근 데이터 우선
+                    priority_score += year - (current_year - 2)
+                
+                valid_dates.append({
+                    'text': match['fullText'],
+                    'year': year,
+                    'month': month,
+                    'score': priority_score
+                })
+        
+        if valid_dates:
+            # 점수 기준으로 정렬하여 가장 적절한 날짜 선택
+            valid_dates.sort(key=lambda x: x['score'], reverse=True)
+            best_date = valid_dates[0]['text'].replace(' ', '')
+            
+            logger.debug(f"날짜 추출 성공: {best_date} (검증된 {len(valid_dates)}개 중 선택)")
+            return best_date
+        
+        # 검증 실패 시 경고 및 기본값 반환
+        logger.warning(f"날짜 검증 실패. 추출된 모든 날짜가 유효하지 않음: {[m.get('fullText', '') for m in date_matches[:3]]}")
+        return "날짜 검증 실패"
 
     except Exception as e:
-        logger.debug(f"날짜 정보 추출 오류: {str(e)}")
+        logger.error(f"날짜 정보 추출 중 오류: {e}")
         return "날짜 추출 실패"
 
 def select_bank(driver, bank_name, config):
-    """은행 선택 (Colab 기반 단순화)"""
+    """개선된 은행 선택 로직 - 정확한 매칭"""
     try:
         driver.get(config.BASE_URL)
         WebDriverWait(driver, config.PAGE_LOAD_TIMEOUT).until(lambda d: d.execute_script('return document.readyState') == 'complete')
         time.sleep(random.uniform(0.5, 1))
 
-        # JavaScript로 은행 링크 찾기 및 클릭
+        # 정확한 은행명 매칭을 위한 JavaScript 로직
         js_script = f"""
-        var allLinks = document.getElementsByTagName('a');
-        for(var i=0; i < allLinks.length; i++) {{
-            if(allLinks[i].textContent.trim() === '{bank_name}' ||
-               allLinks[i].textContent.includes('{bank_name}')) {{
-                allLinks[i].scrollIntoView({{block: 'center'}});
-                allLinks[i].click();
-                return "링크 클릭";
-            }}
-        }}
-
-        var allCells = document.getElementsByTagName('td');
-        for(var i=0; i < allCells.length; i++) {{
-            if(allCells[i].textContent.trim() === '{bank_name}' ||
-               allCells[i].textContent.includes('{bank_name}')) {{
-                allCells[i].scrollIntoView({{block: 'center'}});
-                var links = allCells[i].getElementsByTagName('a');
-                if(links.length > 0) {{
-                    links[0].click();
-                    return "셀 내 링크 클릭";
+        function selectExactBank(targetBankName) {{
+            // 1단계: 정확한 텍스트 매칭 우선 시도
+            var allElements = document.querySelectorAll('a, td');
+            var exactMatches = [];
+            var partialMatches = [];
+            
+            for (var i = 0; i < allElements.length; i++) {{
+                var element = allElements[i];
+                var text = element.textContent.trim();
+                
+                if (text === targetBankName) {{
+                    exactMatches.push(element);
+                }} else if (text.includes(targetBankName)) {{
+                    partialMatches.push({{
+                        element: element,
+                        text: text,
+                        score: text.length - targetBankName.length  // 짧을수록 더 정확한 매치
+                    }});
                 }}
-                allCells[i].click();
-                return "셀 클릭";
             }}
+            
+            // 정확한 매치 우선 처리
+            if (exactMatches.length > 0) {{
+                var target = exactMatches[0];
+                target.scrollIntoView({{block: 'center'}});
+                
+                // td 내부의 링크 확인
+                if (target.tagName === 'TD') {{
+                    var links = target.getElementsByTagName('a');
+                    if (links.length > 0) {{
+                        links[0].click();
+                        return "exact_match_with_link";
+                    }}
+                }}
+                
+                target.click();
+                return "exact_match";
+            }}
+            
+            // 부분 매치 처리 (가장 짧은 텍스트 우선)
+            if (partialMatches.length > 0) {{
+                partialMatches.sort(function(a, b) {{ return a.score - b.score; }});
+                
+                // 타겟 은행명이 포함되어 있지만 너무 길지 않은 경우만 선택
+                for (var j = 0; j < partialMatches.length; j++) {{
+                    var match = partialMatches[j];
+                    
+                    // 길이 차이가 5글자 이하인 경우만 허용 (예: "JT" vs "JT친애" 구분)
+                    if (match.score <= 5) {{
+                        var target = match.element;
+                        target.scrollIntoView({{block: 'center'}});
+                        
+                        if (target.tagName === 'TD') {{
+                            var links = target.getElementsByTagName('a');
+                            if (links.length > 0) {{
+                                links[0].click();
+                                return "partial_match_with_link: " + match.text;
+                            }}
+                        }}
+                        
+                        target.click();
+                        return "partial_match: " + match.text;
+                    }}
+                }}
+            }}
+            
+            return false;
         }}
-        return false;
+        
+        return selectExactBank('{bank_name}');
         """
+        
         result = driver.execute_script(js_script)
         if result:
-            logger.debug(f"{bank_name} 은행: {result} 성공")
+            logger.debug(f"{bank_name} 은행 선택: {result}")
             time.sleep(random.uniform(0.5, 1))
             return True
 
@@ -477,8 +597,71 @@ class BankScraper:
         self.config = config; self.driver_manager = driver_manager; self.progress_manager = progress_manager
         self.email_sender = EmailSender()
 
+    def classify_table_by_content(self, table_df):
+        """테이블 내용을 분석하여 적절한 카테고리 결정"""
+        try:
+            if table_df is None or table_df.empty:
+                return "기타"
+            
+            # 테이블 텍스트 내용 추출
+            table_text = ""
+            
+            # 컬럼명에서 텍스트 추출
+            try:
+                if hasattr(table_df, 'columns'):
+                    col_text = " ".join(str(col).lower() for col in table_df.columns if col is not None)
+                    table_text += col_text + " "
+            except:
+                pass
+            
+            # 데이터 내용에서 텍스트 추출 (상위 3행만)
+            try:
+                max_rows = min(3, len(table_df))
+                for i in range(max_rows):
+                    for val in table_df.iloc[i].values:
+                        try:
+                            if pd.notna(val) and val is not None:
+                                table_text += str(val).lower() + " "
+                        except:
+                            continue
+            except:
+                pass
+            
+            if not table_text.strip():
+                return "기타"
+            
+            # 카테고리별 키워드 정의
+            category_keywords = {
+                "영업개황": ["영업점", "직원", "점포", "지점", "임직원", "조직", "본점", "점포수", "직원수", "임원", "영업망", "지역본부", "영업소"],
+                "재무현황": ["자산", "부채", "자본", "총자산", "총부채", "자기자본", "대차대조표", "재무상태표", "현금", "예금", "대출", "유가증권", "고정자산", "유동자산", "차입금"],
+                "손익현황": ["수익", "비용", "손익", "이익", "손실", "매출", "영업이익", "순이익", "손익계산서", "이자수익", "이자비용", "당기순이익", "영업수익", "영업비용"],
+                "기타": ["기타", "부가정보", "주요사항", "특기사항", "공시사항", "참고사항", "비고", "주석", "설명"]
+            }
+            
+            # 카테고리별 점수 계산
+            category_scores = {}
+            for category, keywords in category_keywords.items():
+                score = 0
+                for keyword in keywords:
+                    try:
+                        score += table_text.count(keyword)
+                    except:
+                        continue
+                category_scores[category] = score
+            
+            # 최고 점수 카테고리 선택
+            if category_scores and max(category_scores.values()) > 0:
+                best_category = max(category_scores, key=category_scores.get)
+                return best_category
+            
+            return "기타"
+            
+        except Exception as e:
+            logger.debug(f"테이블 분류 중 오류: {e}")
+            return "기타"
+
     def scrape_single_bank(self, bank_name, driver):
-        """단일 은행 스크래핑 (Colab 구조 기반)"""
+        """단일 은행 스크래핑 - 테이블 내용 기반 분류"""
         logger.info(f"[{bank_name}] 스크래핑 시작")
 
         try:
@@ -500,10 +683,11 @@ class BankScraper:
             elif normalized_date not in [None, "알 수 없는 형식"]:
                 logger.warning(f"[{bank_name}] 날짜 불일치: {normalized_date}")
 
-            result_data = {'날짜정보': date_info}
+            # 모든 테이블을 수집한 후 내용별로 분류
+            all_collected_tables = []
             all_table_hashes = set()  # 전역 중복 제거용
 
-            # 각 카테고리 처리
+            # 각 카테고리 탭에서 테이블 수집
             for category in self.config.CATEGORIES:
                 try:
                     # 카테고리 탭 클릭
@@ -517,8 +701,7 @@ class BankScraper:
                         logger.debug(f"{bank_name} 은행 {category} 카테고리에서 테이블 없음")
                         continue
 
-                    # 중복 제거된 유효 테이블 저장
-                    valid_tables = []
+                    # 중복 제거 및 수집
                     for df in tables:
                         try:
                             shape_hash = f"{df.shape}"
@@ -530,25 +713,58 @@ class BankScraper:
                             table_hash = f"{shape_hash}_{headers_hash}_{data_hash}"
 
                             if table_hash not in all_table_hashes:
-                                valid_tables.append(df)
+                                all_collected_tables.append({
+                                    'table': df,
+                                    'source_category': category
+                                })
                                 all_table_hashes.add(table_hash)
                         except:
-                            valid_tables.append(df)
+                            all_collected_tables.append({
+                                'table': df,
+                                'source_category': category
+                            })
 
-                    # 유효한 테이블 저장
-                    if valid_tables:
-                        result_data[category] = valid_tables
-                        logger.debug(f"{bank_name} 은행 {category} 카테고리에서 {len(valid_tables)}개 테이블 추출")
+                    logger.debug(f"{bank_name} 은행 {category} 카테고리에서 {len(tables)}개 테이블 수집")
 
                 except Exception as e:
                     logger.error(f"{bank_name} 은행 {category} 카테고리 처리 실패: {str(e)}")
 
-            # 데이터 수집 여부 확인
-            if not any(isinstance(data, list) and data for key, data in result_data.items() if key != '날짜정보'):
-                logger.error(f"{bank_name} 은행에서 데이터를 추출할 수 없습니다.")
+            if not all_collected_tables:
+                logger.error(f"{bank_name} 은행에서 테이블을 수집할 수 없습니다.")
                 return None
 
-            logger.info(f"[{bank_name}] 데이터 수집 완료")
+            # 수집된 테이블을 내용 기반으로 분류
+            categorized_tables = {category: [] for category in self.config.CATEGORIES}
+            
+            for table_info in all_collected_tables:
+                table = table_info['table']
+                source_category = table_info['source_category']
+                
+                # 테이블 내용 분석하여 적절한 카테고리 결정
+                classified_category = self.classify_table_by_content(table)
+                
+                # 분류된 카테고리에 테이블 추가
+                categorized_tables[classified_category].append(table)
+                
+                # 재분류된 경우 로그 기록
+                if classified_category != source_category:
+                    logger.debug(f"[{bank_name}] 테이블 재분류: {source_category} → {classified_category}")
+
+            # 결과 데이터 구성
+            result_data = {'날짜정보': date_info}
+            
+            # 분류된 테이블만 포함 (빈 카테고리는 제외)
+            for category, tables in categorized_tables.items():
+                if tables:
+                    result_data[category] = tables
+                    logger.debug(f"[{bank_name}] {category}: {len(tables)}개 테이블 분류 완료")
+
+            # 데이터 수집 여부 확인
+            if not any(isinstance(data, list) and data for key, data in result_data.items() if key != '날짜정보'):
+                logger.error(f"{bank_name} 은행에서 분류된 데이터를 추출할 수 없습니다.")
+                return None
+
+            logger.info(f"[{bank_name}] 데이터 수집 및 분류 완료")
             return result_data
 
         except Exception as e:

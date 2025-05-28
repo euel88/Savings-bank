@@ -1,15 +1,19 @@
-numpy==1.24.4 # pandas 2.0.3과 호환되는 numpy 버전 명시
+# requirements.txt
 
-selenium>=4.10
+# Pandas와 호환성을 위해 명시 (워크플로우에서 특정 버전으로 먼저 설치하는 것을 권장)
+numpy==1.24.4
 
-pandas>=2.0.0 # pandas==2.0.3 도 괜찮음
+# 웹 스크래핑 및 자동화
+selenium>=4.10.0
 
-beautifulsoup4
+# 데이터 분석 및 Excel 처리
+pandas>=2.0.0
+openpyxl>=3.0.0 # pandas가 Excel .xlsx 파일을 다룰 때 필요
 
-openpyxl
+# HTML 파싱 (pandas.read_html이 내부적으로 사용)
+beautifulsoup4>=4.9.3
+lxml>=4.6.3     # HTML/XML 파서 (beautifulsoup4 또는 pandas가 사용)
+html5lib>=1.1   # 또 다른 HTML 파서 (beautifulsoup4 또는 pandas가 사용)
 
-lxml
-
-tqdm
-
-html5lib
+# 진행률 표시
+tqdm>=4.60.0

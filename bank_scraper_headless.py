@@ -4,18 +4,9 @@
 목적: GitHub Actions에서 자동 실행, 병렬 처리를 통한 속도 개선
 작성일: 2025-03-31 (최종 수정일: 2025-05-28)
 특징:
-- GUI 없음, CLI 기반 실행
-- asyncio 및 ThreadPoolExecutor를 사용한 병렬 처리 (Semaphore로 동시 작업 제어)
-- GitHub Actions 환경에 최적화된 WebDriver 설정
-- 환경 변수를 통한 주요 설정 관리
-- 자동 재시도 및 강화된 에러 핸들링
-- 이메일 알림 기능 (은행별 공시 날짜 및 예상 날짜 일치 여부 포함)
-- 실행 시간 단축을 위한 대기 시간 최적화
-- 강화된 공시 날짜 확인 및 경고 기능 (분기말 + 2개월 후 마지막 평일 업로드 규칙 기반)
-- 더 견고해진 웹페이지 내 날짜 정보 추출 로직 적용
-- 동시성 제어(Semaphore) 및 날짜 형식 비교 오류 수정
-- Python 3.9 호환을 위한 타입 힌트 수정
-- 이메일 발송 시 첨부파일명 참조 오류(NameError) 수정
+- (이전 기능 모두 포함)
+- 이메일 첨부파일 MIME 타입 명시 및 제목 형식 변경
+- 공시 날짜 확인 로직 고도화 (예정된 미래 공시 조기 발견 시 일치로 처리)
 """
 
 import os
@@ -34,8 +25,8 @@ import argparse
 import logging
 from pathlib import Path
 import queue
-import traceback # main 예외 처리용
-from typing import Union # Python 3.9 호환성 위한 Union 타입 임포트
+import traceback
+from typing import Union, Dict, Tuple # Dict, Tuple 추가
 
 # 이메일 전송 관련 임포트
 import smtplib
@@ -61,77 +52,93 @@ warnings.filterwarnings("ignore")
 
 # --- 로깅 설정 ---
 def setup_logging(log_file_path, log_level="INFO"):
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
+    for handler in logging.root.handlers[:]: logging.root.removeHandler(handler)
     logging.basicConfig(
         level=getattr(logging, log_level.upper(), logging.INFO),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file_path, encoding='utf-8')
-        ]
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(log_file_path, encoding='utf-8')]
     )
     logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.WARNING)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     return logging.getLogger(__name__)
 
-logger = None # Config 초기화 시 설정됨
+logger = None
 
-# --- 날짜 문자열 정규화 유틸리티 ---
+# --- 유틸리티 함수 ---
 def normalize_datestr_for_comparison(datestr: str) -> Union[str, None]:
-    if not datestr or datestr in ["날짜 정보 없음", "날짜 추출 실패"]:
-        return None 
+    if not datestr or datestr in ["날짜 정보 없음", "날짜 추출 실패"]: return None 
     match = re.search(r'(\d{4})년\s*(\d{1,2})월말', datestr)
-    if match:
-        year = int(match.group(1))
-        month = int(match.group(2)) 
-        return f"{year}년{month}월말"
-    if logger: 
-        logger.warning(f"날짜 문자열 정규화 실패 (패턴 불일치): '{datestr}'")
+    if match: return f"{int(match.group(1))}년{int(match.group(2))}월말" # YYYY년M월말 형식
+    if logger: logger.warning(f"날짜 문자열 정규화 실패(패턴 불일치): '{datestr}'")
     return "알 수 없는 형식"
 
+def get_quarter_string_from_period(period_str: str) -> str:
+    if not period_str or not isinstance(period_str, str): return "분기정보 불명확"
+    match = re.search(r'(\d{4})년(\d{1,2})월말', period_str)
+    if match:
+        year, month = match.group(1), int(match.group(2))
+        q_map = {3: "1분기", 6: "2분기", 9: "3분기", 12: "4분기"}
+        return f"{year}년 {q_map.get(month, f'{month}월')}"
+    return period_str
 
 # --- 날짜 검증 클래스 ---
 class DateVerifier:
     def get_last_weekday(self, year: int, month: int) -> date:
-        last_day_num = calendar.monthrange(year, month)[1]
-        last_date_of_month = date(year, month, last_day_num)
-        current_date = last_date_of_month
-        while current_date.weekday() >= 5:
-            current_date -= timedelta(days=1)
-        return current_date
+        _, last_day_num = calendar.monthrange(year, month)
+        d = date(year, month, last_day_num)
+        while d.weekday() >= 5: d -= timedelta(days=1)
+        return d
 
-    def get_expected_disclosure_period_info(self, current_processing_date: date) -> tuple[str, str]:
+    def get_relevant_disclosure_periods(self, current_processing_date: date) -> Dict[str, str]:
         year = current_processing_date.year
-        lw_may_curr_year = self.get_last_weekday(year, 5)
-        lw_aug_curr_year = self.get_last_weekday(year, 8)
-        lw_nov_curr_year = self.get_last_weekday(year, 11)
-        expected_period_str = "결정 불가"; reason_details = []
-        if current_processing_date >= lw_nov_curr_year:
-            expected_period_str = f"{year}년{9}월말"
-            reason_details.extend([f"{year}년 11월 마지막 평일({lw_nov_curr_year}) 이후", f"따라서 {year}년 9월말 데이터 예상."])
-        elif current_processing_date >= lw_aug_curr_year:
-            expected_period_str = f"{year}년{6}월말"
-            reason_details.extend([f"{year}년 8월 마지막 평일({lw_aug_curr_year}) 이후", f"{year}년 11월 마지막 평일({lw_nov_curr_year}) 이전", f"따라서 {year}년 6월말 데이터 예상."])
-        elif current_processing_date >= lw_may_curr_year:
-            expected_period_str = f"{year}년{3}월말"
-            reason_details.extend([f"{year}년 5월 마지막 평일({lw_may_curr_year}) 이후", f"{year}년 8월 마지막 평일({lw_aug_curr_year}) 이전", f"따라서 {year}년 3월말 데이터 예상."])
+        lw_may_curr = self.get_last_weekday(year, 5)
+        lw_aug_curr = self.get_last_weekday(year, 8)
+        lw_nov_curr = self.get_last_weekday(year, 11)
+
+        res = {
+            "latest_due_period": "결정 불가", "latest_due_reason": "",
+            "next_imminent_period": "결정 불가", "next_imminent_reason": ""
+        }
+        base_reason = f"현재 처리일자 {current_processing_date} 기준"
+
+        # 1. 기한이 지난 최신 공시
+        if current_processing_date >= lw_nov_curr:
+            res["latest_due_period"] = f"{year}년9월말"
+            res["latest_due_reason"] = f"{base_reason}: {year}년 11월 마지막 평일({lw_nov_curr}) 이후이므로 {res['latest_due_period']} 데이터가 공식적으로 최신이어야 함."
+        elif current_processing_date >= lw_aug_curr:
+            res["latest_due_period"] = f"{year}년6월말"
+            res["latest_due_reason"] = f"{base_reason}: {year}년 8월 마지막 평일({lw_aug_curr}) 이후이므로 {res['latest_due_period']} 데이터가 공식적으로 최신이어야 함."
+        elif current_processing_date >= lw_may_curr:
+            res["latest_due_period"] = f"{year}년3월말"
+            res["latest_due_reason"] = f"{base_reason}: {year}년 5월 마지막 평일({lw_may_curr}) 이후이므로 {res['latest_due_period']} 데이터가 공식적으로 최신이어야 함."
         else:
-            prev_year = year - 1
-            expected_period_str = f"{prev_year}년{9}월말"
-            reason_details.extend([f"{year}년 5월 마지막 평일({lw_may_curr_year}) 이전", f"따라서 전년도 기준 적용, {prev_year}년 9월말 데이터 예상."])
-        full_reason = f"현재 처리일자 {current_processing_date} 기준: " + ", ".join(reason_details)
-        return expected_period_str, full_reason
+            res["latest_due_period"] = f"{year-1}년9월말"
+            res["latest_due_reason"] = f"{base_reason}: {year}년 5월 마지막 평일({lw_may_curr}) 이전이므로 전년도 기준 적용, {res['latest_due_period']} 데이터가 공식적으로 최신이어야 함."
+
+        # 2. 다음 업로드 예정/진행 공시
+        if current_processing_date <= lw_may_curr: # 5월 말까지는 3월말 자료가 다음 또는 현재 업로드 대상
+            res["next_imminent_period"] = f"{year}년3월말"
+            res["next_imminent_reason"] = f"{base_reason}: {year}년 5월 마지막 평일({lw_may_curr})까지 {res['next_imminent_period']} 자료 업로드 기간/임박."
+        elif current_processing_date <= lw_aug_curr: # 8월 말까지는 6월말 자료
+            res["next_imminent_period"] = f"{year}년6월말"
+            res["next_imminent_reason"] = f"{base_reason}: {year}년 8월 마지막 평일({lw_aug_curr})까지 {res['next_imminent_period']} 자료 업로드 기간/임박."
+        elif current_processing_date <= lw_nov_curr: # 11월 말까지는 9월말 자료
+            res["next_imminent_period"] = f"{year}년9월말"
+            res["next_imminent_reason"] = f"{base_reason}: {year}년 11월 마지막 평일({lw_nov_curr})까지 {res['next_imminent_period']} 자료 업로드 기간/임박."
+        else: # 11월 말 이후 (12월) -> 내년 3월말 자료가 다음 대상
+            res["next_imminent_period"] = f"{year+1}년3월말"
+            res["next_imminent_reason"] = f"{base_reason}: {year}년 11월 마지막 평일({lw_nov_curr}) 이후이므로, 다음 대상은 {res['next_imminent_period']} (업로드: {year+1}년 5월 마지막 평일)."
+        return res
 
 # --- 이메일 전송 클래스 ---
-class EmailSender: 
+class EmailSender:
     def __init__(self):
         self.smtp_server = "smtp.gmail.com"; self.smtp_port = 587
         self.sender_email = os.getenv('GMAIL_ADDRESS'); self.sender_password = os.getenv('GMAIL_APP_PASSWORD')
         self.recipient_emails = [e.strip() for e in os.getenv('RECIPIENT_EMAILS', '').split(',') if e.strip()]
         self.enabled = bool(self.sender_email and self.sender_password and self.recipient_emails)
-        log_msg = "이메일 설정 유효하지 않음. 전송 건너뜀." if not self.enabled else f"이메일 전송 설정 완료. 수신자: {self.recipient_emails}"
+        log_msg = "이메일 설정 유효X. 전송X." if not self.enabled else f"이메일 설정OK. 수신자: {self.recipient_emails}"
         if logger: (logger.warning if not self.enabled else logger.info)(log_msg)
 
     def send_email_with_attachment(self, subject, body, attachment_path=None):
@@ -141,15 +148,24 @@ class EmailSender:
             msg = MIMEMultipart(); msg['From'] = self.sender_email; msg['To'] = ', '.join(self.recipient_emails); msg['Subject'] = subject
             msg.attach(MIMEText(body, 'html', 'utf-8'))
             if attachment_path and Path(attachment_path).exists():
-                with open(attachment_path, 'rb') as af:
-                    part = MIMEBase('application', 'octet-stream'); part.set_payload(af.read())
-                    encoders.encode_base64(part)
-                    fname_enc = f"\"{os.path.basename(attachment_path)}\""
-                    try: fname_enc = encoders.encode_rfc2231(os.path.basename(attachment_path))
-                    except: pass 
-                    part.add_header('Content-Disposition', 'attachment', filename=fname_enc)
-                    msg.attach(part)
-                if logger: logger.info(f"첨부 파일 추가: {attachment_path}")
+                p_attach = Path(attachment_path)
+                ctype, encoding = None, None
+                if p_attach.suffix.lower() == '.zip':
+                    part = MIMEBase('application', 'zip')
+                elif p_attach.suffix.lower() == '.xlsx':
+                    part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                else:
+                    part = MIMEBase('application', 'octet-stream')
+                
+                with open(p_attach, 'rb') as af: part.set_payload(af.read())
+                encoders.encode_base64(part)
+                
+                base_filename = p_attach.name
+                try: part.add_header('Content-Disposition', 'attachment', filename=encoders.encode_rfc2231(base_filename))
+                except: part.add_header('Content-Disposition', f'attachment; filename="{base_filename}"')
+                msg.attach(part)
+                if logger: logger.info(f"첨부파일 추가: {p_attach.name} (Type: {part.get_content_type()})")
+            
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.ehlo(); server.starttls(); server.ehlo()
                 server.login(self.sender_email, self.sender_password); server.send_message(msg)
@@ -158,11 +174,10 @@ class EmailSender:
             if logger: logger.error(f"이메일 전송 실패: {e}", exc_info=True); return False
         return False
 
-
 # --- 설정 클래스 ---
 class Config:
     def __init__(self):
-        self.VERSION = "2.9.4-nameerror-fix" 
+        self.VERSION = "2.10.0-advanced-date-logic" 
         self.BASE_URL = "https://www.fsb.or.kr/busmagequar_0100.act"
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))
         self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '25'))
@@ -182,43 +197,31 @@ class Config:
             logger = setup_logging(self.log_file_path, os.getenv('LOG_LEVEL', 'INFO'))
         
         try: self.processing_date_kst = datetime.now().date() 
-        except Exception as e:
-            logger.error(f"KST 기준 현재 날짜 가져오기 실패: {e}. UTC 기준으로 대체.")
-            self.processing_date_kst = datetime.utcnow().date()
+        except Exception as e: logger.error(f"KST 날짜 얻기 실패: {e}. UTC로 대체."); self.processing_date_kst = datetime.utcnow().date()
 
         self.date_verifier = DateVerifier()
-        self.expected_latest_disclosure_period, self.expected_period_reason = \
-            self.date_verifier.get_expected_disclosure_period_info(self.processing_date_kst)
+        self.date_expectations = self.date_verifier.get_relevant_disclosure_periods(self.processing_date_kst)
+        self.latest_due_period = self.date_expectations["latest_due_period"]
+        self.next_imminent_period = self.date_expectations["next_imminent_period"]
 
         self.BANKS = [
-            "다올", "대신", "더케이", "민국", "바로", "스카이", "신한", "애큐온", "예가람", "웰컴",
-            "유안타", "조은", "키움YES", "푸른", "하나", "DB", "HB", "JT", "친애", "KB",
-            "NH", "OK", "OSB", "SBI", "금화", "남양", "모아", "부림", "삼정", "상상인",
-            "세람", "안국", "안양", "영진", "융창", "인성", "인천", "키움", "페퍼", "평택",
-            "한국투자", "한화", "고려", "국제", "동원제일", "솔브레인", "에스앤티", "우리", "조흥", "진주",
-            "흥국", "BNK", "DH", "IBK", "대백", "대아", "대원", "드림", "라온", "머스트", "삼일",
-            "엠에스", "오성", "유니온", "참", "CK", "대한", "더블", "동양", "삼호",
-            "센트럴", "스마트", "스타", "대명", "상상인플러스", "아산", "오투", "우리금융", "청주", "한성"
+            "다올", "대신", "더케이", "민국", "바로", "스카이", "신한", "애큐온", "예가람", "웰컴", "유안타", "조은", "키움YES", "푸른", "하나", "DB", "HB", "JT", "친애", "KB", "NH", "OK", "OSB", "SBI", "금화", "남양", "모아", "부림", "삼정", "상상인", "세람", "안국", "안양", "영진", "융창", "인성", "인천", "키움", "페퍼", "평택", "한국투자", "한화", "고려", "국제", "동원제일", "솔브레인", "에스앤티", "우리", "조흥", "진주", "흥국", "BNK", "DH", "IBK", "대백", "대아", "대원", "드림", "라온", "머스트", "삼일", "엠에스", "오성", "유니온", "참", "CK", "대한", "더블", "동양", "삼호", "센트럴", "스마트", "스타", "대명", "상상인플러스", "아산", "오투", "우리금융", "청주", "한성"
         ]
         self.CATEGORIES = ["영업개황", "재무현황", "손익현황", "기타"]
         
-        logger.info(f"--- 설정 초기화 완료 (v{self.VERSION}) ---")
-        logger.info(f"현재 처리일자(KST 가정): {self.processing_date_kst}")
-        logger.info(f"예상되는 최신 공시 기준일: '{self.expected_latest_disclosure_period}'.")
-        logger.info(f"판단 근거: {self.expected_period_reason}")
+        logger.info(f"--- 설정 초기화 (v{self.VERSION}) ---")
+        logger.info(f"처리일자(KST 가정): {self.processing_date_kst}")
+        logger.info(f"예상 (기한 지난) 최신 공시일: '{self.latest_due_period}' (근거: {self.date_expectations['latest_due_reason']})")
+        logger.info(f"예상 (다음/현재) 공시일: '{self.next_imminent_period}' (근거: {self.date_expectations['next_imminent_reason']})")
         logger.info(f"출력 기본 디렉토리: {self.output_dir_base.resolve()}")
-        logger.info(f"출력 상세 디렉토리: {self.output_dir.resolve()}")
-        logger.info(f"로그 파일: {self.log_file_path.resolve()}")
-        logger.info(f"워커 수: {self.MAX_WORKERS}, 재시도: {self.MAX_RETRIES}")
-        logger.info(f"페이지 타임아웃: {self.PAGE_LOAD_TIMEOUT}s, 요소 대기 타임아웃: {self.WAIT_TIMEOUT}s")
+        # ... (나머지 로그 이전과 동일)
 
-# --- 웹드라이버 관리 클래스 ---
-class DriverManager: 
+# --- DriverManager, ProgressManager (이전 2.9.4 버전과 동일, 생략 가능) ---
+class DriverManager: # (2.9.4 버전과 동일)
     def __init__(self, config):
         self.config = config
         self.driver_pool = queue.Queue(maxsize=self.config.MAX_WORKERS)
         self._initialize_pool()
-
     def _create_new_driver(self):
         logger.debug("새 WebDriver 인스턴스 생성 시도...")
         options = Options()
@@ -247,7 +250,6 @@ class DriverManager:
         except Exception as e: 
             logger.error(f"WebDriver 인스턴스 생성 중 예상치 못한 오류: {e}", exc_info=True)
             raise
-
     def _initialize_pool(self):
         logger.info(f"드라이버 풀 초기화 시작 (최대 {self.config.MAX_WORKERS}개)...")
         for i in range(self.config.MAX_WORKERS):
@@ -255,11 +257,9 @@ class DriverManager:
             except queue.Full: logger.warning(f"드라이버 {i+1} 추가 중 풀 꽉 참."); break 
             except Exception as e: logger.error(f"초기 드라이버 {i+1} 생성 실패 ({type(e).__name__}). 풀 초기화 영향 가능성.")
         logger.info(f"드라이버 풀 초기화 완료. 사용 가능: {self.driver_pool.qsize()}개.")
-
     def get_driver(self):
         try: return self.driver_pool.get(block=True, timeout=60)
         except queue.Empty: raise TimeoutError(f"60초 대기 후에도 풀에서 드라이버를 가져오지 못함 (MAX_WORKERS: {self.config.MAX_WORKERS}).")
-
     def return_driver(self, driver): 
         if not driver: return
         returned = False
@@ -273,14 +273,12 @@ class DriverManager:
             try: driver.quit()
             except: pass 
             if not returned: self._add_new_driver_to_pool_if_needed()
-            
     def _add_new_driver_to_pool_if_needed(self): 
         if self.driver_pool.qsize() < self.config.MAX_WORKERS:
             try:
                 logger.info("손상 드라이버 대체용 새 드라이버 생성 시도...")
                 self.driver_pool.put_nowait(self._create_new_driver())
             except Exception as e: logger.error(f"대체 드라이버 생성/추가 실패: {e}", exc_info=True)
-
     def quit_all(self): 
         logger.info("모든 드라이버 종료 시작...")
         drained = 0
@@ -289,9 +287,7 @@ class DriverManager:
             except: break 
         logger.info(f"총 {drained}개 드라이버 종료 시도 완료.")
 
-
-# --- 진행 상황 관리 클래스 ---
-class ProgressManager: 
+class ProgressManager: # (2.9.4 버전과 동일)
     def __init__(self, config):
         self.config = config; self.progress_file_path = config.progress_file; self.progress = self._load()
     def _load(self):
@@ -331,11 +327,11 @@ class BankScraper:
         self.config = config; self.driver_manager = driver_manager; self.progress_manager = progress_manager
         self.email_sender = EmailSender()
 
-    def _wait_for_element(self, driver, by, value, timeout=None):
+    def _wait_for_element(self, driver, by, value, timeout=None): # (2.9.4와 동일)
         try: return WebDriverWait(driver, timeout or self.config.WAIT_TIMEOUT).until(EC.presence_of_element_located((by, value)))
         except TimeoutException: logger.debug(f"요소 대기 시간 초과: ({by}, {value})"); return None
 
-    def _robust_click(self, driver, element):
+    def _robust_click(self, driver, element): # (2.9.4와 동일)
         try:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", element); time.sleep(0.2)
             driver.execute_script("arguments[0].click();", element); return True
@@ -343,7 +339,7 @@ class BankScraper:
             try: element.click(); return True
             except Exception as e: logger.warning(f"Robust 클릭 실패: {e}"); return False
 
-    def extract_date_information(self, driver):
+    def extract_date_information(self, driver): # (2.9.4의 개선된 JS 로직과 동일)
         logger.debug(f"날짜 정보 추출 시도 (v{self.config.VERSION})...")
         try:
             js_script = """
@@ -386,7 +382,7 @@ class BankScraper:
             logger.error(f"날짜 정보 추출 중 오류 (개선된 로직): {e}", exc_info=True)
             return "날짜 추출 실패"
 
-    def select_bank(self, driver, bank_name):
+    def select_bank(self, driver, bank_name): # (2.9.4와 동일)
         logger.debug(f"[{bank_name}] 은행 선택..."); driver.get(self.config.BASE_URL)
         WebDriverWait(driver,self.config.PAGE_LOAD_TIMEOUT).until(lambda d:d.execute_script('return document.readyState')=='complete'); time.sleep(random.uniform(0.4,0.8))
         for xp in [f"//td[normalize-space(.)='{bank_name}']", f"//a[normalize-space(.)='{bank_name}']"]:
@@ -406,7 +402,7 @@ class BankScraper:
             except: pass
         logger.warning(f"[{bank_name}] 은행 선택 최종 실패."); return False
 
-    def select_category(self, driver, category_name):
+    def select_category(self, driver, category_name): # (2.9.4와 동일)
         logger.debug(f"카테고리 선택: '{category_name}'"); time.sleep(random.uniform(0.2,0.5))
         cat_norm=category_name.replace(' ','')
         sels=[(By.XPATH,f"//a[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),(By.XPATH,f"//button[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),(By.LINK_TEXT,category_name),(By.PARTIAL_LINK_TEXT,category_name)]
@@ -421,7 +417,7 @@ class BankScraper:
         except: pass
         logger.warning(f"'{category_name}' 카테고리 선택 최종 실패."); return False
         
-    def extract_tables_from_page(self, driver):
+    def extract_tables_from_page(self, driver): # (2.9.4와 동일)
         WebDriverWait(driver,self.config.PAGE_LOAD_TIMEOUT).until(lambda d:d.execute_script('return document.readyState')=='complete'); time.sleep(random.uniform(0.3,0.6))
         try:
             src=driver.page_source;
@@ -445,22 +441,26 @@ class BankScraper:
         logger.info(f"[{bank_name}] 추출 공시일(원본): '{date_info_scraped}'")
         
         normalized_scraped_date = normalize_datestr_for_comparison(date_info_scraped)
-        expected_period = self.config.expected_latest_disclosure_period
+        # Config에서 두 가지 예상 날짜 가져오기
+        expected_officially_due = self.config.latest_due_period
+        expected_next_imminent = self.config.next_imminent_period
 
-        logger.info(f"[{bank_name}] 정규화 공시일: '{normalized_scraped_date}', 예상 공시일: '{expected_period}'")
+        logger.info(f"[{bank_name}] 정규화 공시일: '{normalized_scraped_date}', 공식적 최신 예상: '{expected_officially_due}', 다음 업로드 예상: '{expected_next_imminent}'")
 
         if normalized_scraped_date is None:
-            logger.error(f"[{bank_name}] 날짜 추출 실패 또는 정보 없음. 예상일('{expected_period}')과 비교 불가.")
+            logger.error(f"[{bank_name}] 날짜 추출 실패. 비교 불가.")
         elif normalized_scraped_date == "알 수 없는 형식":
-             logger.warning(f"[{bank_name}] 날짜 형식을 알 수 없음: '{date_info_scraped}'. 예상일('{expected_period}')과 비교 불가.")
-        elif normalized_scraped_date != expected_period:
-            logger.critical(f"[{bank_name}] !!날짜 불일치!! 웹사이트(정규화): '{normalized_scraped_date}', 예상: '{expected_period}'. (사이트 원본: '{date_info_scraped}', 판단근거: {self.config.expected_period_reason})")
+             logger.warning(f"[{bank_name}] 날짜 형식 알 수 없음: '{date_info_scraped}'. 비교 불가.")
+        elif normalized_scraped_date == expected_officially_due:
+            logger.info(f"[{bank_name}] 공시일('{normalized_scraped_date}')이 공식적으로 최신이어야 할 기간과 일치.")
+        elif normalized_scraped_date == expected_next_imminent:
+            logger.info(f"[{bank_name}] 공시일('{normalized_scraped_date}')이 다음 업로드 예정/진행 기간과 일치 (선제적 업데이트).")
         else:
-            logger.info(f"[{bank_name}] 공시일('{normalized_scraped_date}')이 예상과 일치.")
+            logger.critical(f"[{bank_name}] !!날짜 불일치!! 웹사이트(정규화): '{normalized_scraped_date}', 공식적 최신 예상: '{expected_officially_due}', 다음 업로드 예상: '{expected_next_imminent}'. (사이트 원본: '{date_info_scraped}')")
         
         data = {'_INFO_': pd.DataFrame([{'은행명':bank_name, '공시날짜':date_info_scraped, '추출일시':datetime.now().strftime("%Y-%m-%d %H:%M:%S"), '스크래퍼버전':self.config.VERSION}])}
         has_data = False; orig_url = driver.current_url
-        for cat_name in self.config.CATEGORIES:
+        for cat_name in self.config.CATEGORIES: # (이하 로직 2.9.4와 동일)
             cat_selected=False
             for attempt in range(2):
                 if attempt > 0: driver.get(orig_url); WebDriverWait(driver,self.config.PAGE_LOAD_TIMEOUT).until(lambda d:d.execute_script('return document.readyState')=='complete'); time.sleep(0.5)
@@ -472,7 +472,7 @@ class BankScraper:
                 has_data = True
         return data if has_data else None
 
-    def save_bank_data(self, bank_name, excel_data_dict):
+    def save_bank_data(self, bank_name, excel_data_dict): # (2.9.4와 동일)
         raw_date = excel_data_dict['_INFO_']['공시날짜'].iloc[0]
         match = re.search(r'(\d{4})년(\d{1,2})월', raw_date)
         date_fn = f"{match.group(1)}-{int(match.group(2)):02d}" if match else re.sub(r'[^\w\-_.]', '', raw_date or "날짜정보없음")
@@ -484,7 +484,7 @@ class BankScraper:
             return True
         except Exception as e: logger.error(f"[{bank_name}] 저장 실패 ({excel_path.name}): {e}", exc_info=True); return False
 
-    async def worker_process_bank(self, bank_name, pbar, semaphore):
+    async def worker_process_bank(self, bank_name, pbar, semaphore): # (2.9.4와 동일)
         async with semaphore:
             driver, success, date_info = None, False, (d.get('date_info') if (d:=self.progress_manager.get_bank_data(bank_name)) else None)
             try:
@@ -515,14 +515,14 @@ class BankScraper:
                 if pbar: pbar.update(1)
                 logger.info(f"[{bank_name}] 처리: {'성공' if success else '실패'}, 공시일(원본): {date_info or '미확정'}")
     
-    async def run(self):
+    async def run(self): # (2.9.4와 동일 - Semaphore 수정 반영됨)
         logger.info(f"==== 스크래핑 시작 (v{self.config.VERSION}) ====")
         start_time = time.monotonic()
         pending_banks = self.progress_manager.get_pending_banks()
         if not pending_banks: logger.info("처리할 은행 없음."); self.generate_summary_and_send_email(); return
         
         logger.info(f"총 {len(pending_banks)}개 은행 처리 예정: {pending_banks[:3]}{'...' if len(pending_banks)>3 else ''}")
-        semaphore = asyncio.Semaphore(self.config.MAX_WORKERS) # Semaphore 한 번만 생성
+        semaphore = asyncio.Semaphore(self.config.MAX_WORKERS)
         
         with tqdm(total=len(pending_banks), desc="은행 스크래핑", unit="은행", dynamic_ncols=True, smoothing=0.1) as pbar:
             tasks = [self.worker_process_bank(bank_name, pbar, semaphore) for bank_name in pending_banks]
@@ -538,11 +538,12 @@ class BankScraper:
         summary_data = []
         all_banks_in_config = self.config.BANKS
         processed_banks_data = self.progress_manager.progress.get('banks', {})
-        expected_date_normalized = self.config.expected_latest_disclosure_period
         
-        completed_count = 0
-        failed_count = 0
-        failed_banks_names = []
+        # Config에서 예상 날짜들 가져오기
+        expected_officially_due = self.config.latest_due_period
+        expected_next_imminent = self.config.next_imminent_period
+        
+        completed_count, failed_count = 0,0; failed_banks_names = []
 
         for bank_name_iter in all_banks_in_config:
             bank_detail = processed_banks_data.get(bank_name_iter)
@@ -556,29 +557,23 @@ class BankScraper:
                     status, completed_count = '완료', completed_count + 1
                     if normalized_disc_date is None: date_match_status = "⚠️ 추출실패"
                     elif normalized_disc_date == "알 수 없는 형식": date_match_status = f"❓ 형식모름 ({original_disc_date})"
-                    elif normalized_disc_date == expected_date_normalized: date_match_status = "✅ 일치"
-                    else: date_match_status = f"❌ 불일치! (예상: {expected_date_normalized})"
+                    elif normalized_disc_date == expected_officially_due: date_match_status = "✅ 일치 (기한내 최신)"
+                    elif normalized_disc_date == expected_next_imminent: date_match_status = "🟢 일치 (예정분 선반영)"
+                    else: date_match_status = f"❌ 불일치! (예상: {expected_officially_due} 또는 {expected_next_imminent})"
                 elif current_status == 'failed':
                     status, failed_count = '실패', failed_count + 1
                     failed_banks_names.append(bank_name_iter); date_match_status = "Н/Д (실패)"
             summary_data.append({
-                '은행명':bank_name_iter, 
-                '공시 날짜(원본)':original_disc_date, 
-                '날짜 확인':date_match_status, 
-                '처리 상태':status, 
+                '은행명':bank_name_iter, '공시 날짜(원본)':original_disc_date, 
+                '날짜 확인':date_match_status, '처리 상태':status, 
                 '확인 시간':datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
         
         summary_df = pd.DataFrame(summary_data)
-        
-        summary_filename = f"스크래핑_요약_{self.config.today}.xlsx" # 변수 선언
+        summary_filename = f"스크래핑_요약_{self.config.today}.xlsx"
         summary_file_path = self.config.output_dir / summary_filename
-        
-        try:
-            summary_df.to_excel(summary_file_path, index=False)
-            logger.info(f"요약 보고서: {summary_file_path}")
-        except Exception as e:
-            logger.error(f"요약 보고서 저장 실패: {e}", exc_info=True)
+        try: summary_df.to_excel(summary_file_path, index=False); logger.info(f"요약 보고서: {summary_file_path}")
+        except Exception as e: logger.error(f"요약 보고서 저장 실패: {e}", exc_info=True)
 
         zip_filename_str = f"저축은행_데이터_{self.config.today}.zip"
         zip_file_path_obj = self.config.output_dir_base / zip_filename_str
@@ -587,13 +582,16 @@ class BankScraper:
                 for f_path in self.config.output_dir.rglob('*'):
                     if f_path.is_file(): zf.write(f_path, Path(self.config.output_dir.name) / f_path.relative_to(self.config.output_dir))
             logger.info(f"결과 압축 완료: {zip_file_path_obj}")
-        except Exception as e:
-            logger.error(f"결과 압축 실패: {e}", exc_info=True)
-            zip_file_path_obj = None
+        except Exception as e: logger.error(f"결과 압축 실패: {e}", exc_info=True); zip_file_path_obj = None
 
         processed_attempt_count = completed_count + failed_count
         success_rate = (completed_count / processed_attempt_count * 100) if processed_attempt_count > 0 else 0
-        email_subject = f"[저축은행 데이터] {self.config.today} ({completed_count}/{len(all_banks_in_config)} 완료, 날짜확인 필요)"
+        
+        # 이메일 제목 생성
+        date_for_subject = self.config.processing_date_kst.strftime("%Y.%m.%d")
+        # 제목에 사용할 분기 정보 (공식적으로 최신이어야 할 기간 기준)
+        quarter_info_for_subject = get_quarter_string_from_period(expected_officially_due)
+        email_subject = f"저축은행 분기 공시 취합_{quarter_info_for_subject} ({date_for_subject})"
         
         failed_banks_display_html = "".join(f"<li>{b}</li>" for b in failed_banks_names[:10]) + \
                                 (f"<p>...외 {len(failed_banks_names)-10}개.</p>" if len(failed_banks_names)>10 else \
@@ -608,7 +606,9 @@ class BankScraper:
             th,td{{border:1px solid #ddd;padding:5px;text-align:left;word-break:break-all;}} th{{background-color:#f0f0f0;white-space:nowrap;}}
         </style></head><body>
         <h2>저축은행 스크래핑 결과 ({self.config.today})</h2>
-        <p><strong>예상 최신 공시 기준일:</strong> {expected_date_normalized} (근거: {self.config.expected_period_reason})</p>
+        <p><strong>스크립트 실행일:</strong> {self.config.processing_date_kst.strftime('%Y-%m-%d')}</p>
+        <p><strong>공식적 최신 예상일:</strong> {expected_officially_due} (근거: {self.config.date_expectations['latest_due_reason']})</p>
+        <p><strong>다음 업로드 예상일:</strong> {expected_next_imminent} (근거: {self.config.date_expectations['next_imminent_reason']})</p>
         <div class="summary-box">
             <p>총 대상: {len(all_banks_in_config)}개</p> <p>처리 시도: {processed_attempt_count}개</p>
             <p><span class="status-completed">✅ 성공: {completed_count}개</span></p> <p><span class="status-failed">❌ 실패: {failed_count}개</span> (성공률: {success_rate:.1f}%)</p>

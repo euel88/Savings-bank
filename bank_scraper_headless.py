@@ -1195,6 +1195,123 @@ def process_with_retry(banks, max_retries=1):
         # 드라이버 정리
         driver_manager.close_all()
 
+def generate_summary_report():
+    """스크래핑 결과 요약 보고서를 생성합니다."""
+    try:
+        progress_manager = ProgressManager()
+        completed_banks = progress_manager.progress.get('completed', [])
+        failed_banks = progress_manager.progress.get('failed', [])
+        validation_data = progress_manager.progress.get('data_validation', [])
+
+        # 은행별 데이터 요약
+        bank_summary = []
+        validation_dict = {item['bank_name']: item for item in validation_data}
+
+        for bank in BANKS:
+            # 각 은행의 엑셀 파일 찾기
+            bank_files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(f"{bank}_") and f.endswith(".xlsx")]
+
+            if bank_files:
+                try:
+                    # 가장 최근 파일 선택
+                    latest_file = sorted(bank_files)[-1]
+                    file_path = os.path.join(OUTPUT_DIR, latest_file)
+
+                    # 엑셀 파일 분석
+                    xls = pd.ExcelFile(file_path)
+                    sheet_count = len(xls.sheet_names)
+
+                    # 카테고리 추출
+                    categories = []
+                    for sheet in xls.sheet_names:
+                        if sheet != '공시정보':
+                            category = sheet.split('_')[0] if '_' in sheet else sheet
+                            categories.append(category)
+
+                    categories = sorted(list(set(categories)))
+
+                    # 공시 정보에서 날짜 및 검증 결과 추출
+                    date_info = "날짜 정보 없음"
+                    validation_result = "검증 없음"
+                    data_freshness = "알 수 없음"
+                    
+                    if '공시정보' in xls.sheet_names:
+                        info_df = pd.read_excel(file_path, sheet_name='공시정보')
+                        if '공시 날짜' in info_df.columns and not info_df['공시 날짜'].empty:
+                            date_info = str(info_df['공시 날짜'].iloc[0])
+                        if '검증 결과' in info_df.columns and not info_df['검증 결과'].empty:
+                            validation_result = str(info_df['검증 결과'].iloc[0])
+                        if '데이터 신선도' in info_df.columns and not info_df['데이터 신선도'].empty:
+                            data_freshness = str(info_df['데이터 신선도'].iloc[0])
+
+                    # 상태 결정
+                    status = '완료' if set(categories) >= set(CATEGORIES) else '부분 완료'
+
+                    bank_summary.append({
+                        '은행명': bank,
+                        '스크래핑 상태': status,
+                        '공시 날짜': date_info,
+                        '데이터 신선도': data_freshness,
+                        '검증 결과': validation_result,
+                        '시트 수': sheet_count - 1,  # 공시정보 시트 제외
+                        '스크래핑된 카테고리': ', '.join(categories)
+                    })
+                    
+                except Exception as e:
+                    bank_summary.append({
+                        '은행명': bank,
+                        '스크래핑 상태': '파일 손상',
+                        '공시 날짜': '확인 불가',
+                        '데이터 신선도': '확인 불가',
+                        '검증 결과': f'오류: {str(e)}',
+                        '시트 수': '확인 불가',
+                        '스크래핑된 카테고리': ''
+                    })
+            else:
+                status = '실패' if bank in failed_banks else '미처리'
+                validation_info = validation_dict.get(bank, {})
+                
+                bank_summary.append({
+                    '은행명': bank,
+                    '스크래핑 상태': status,
+                    '공시 날짜': validation_info.get('date_info', ''),
+                    '데이터 신선도': '최신' if validation_info.get('is_fresh', False) else '구버전',
+                    '검증 결과': '검증 완료' if bank in validation_dict else '검증 안됨',
+                    '시트 수': 0,
+                    '스크래핑된 카테고리': ''
+                })
+
+        # 요약 DataFrame 생성 및 정렬
+        summary_df = pd.DataFrame(bank_summary)
+        status_order = {'완료': 0, '부분 완료': 1, '파일 손상': 2, '실패': 3, '미처리': 4}
+        summary_df['상태순서'] = summary_df['스크래핑 상태'].map(status_order)
+        summary_df = summary_df.sort_values(['상태순서', '은행명']).drop('상태순서', axis=1)
+
+        # 요약 파일 저장
+        summary_file = os.path.join(OUTPUT_DIR, f"스크래핑_요약_{TODAY}.xlsx")
+        summary_df.to_excel(summary_file, index=False)
+
+        # 통계 정보 계산
+        stats = {
+            '전체 은행 수': len(BANKS),
+            '완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '완료']),
+            '부분 완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '부분 완료']),
+            '실패 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] in ['실패', '파일 손상']]),
+            '최신 데이터 은행 수': len([r for r in bank_summary if r['데이터 신선도'] == '최신']),
+            '성공률': f"{len([r for r in bank_summary if r['스크래핑 상태'] in ['완료', '부분 완료']]) / len(BANKS) * 100:.2f}%"
+        }
+
+        log_message("\n===== 스크래핑 결과 요약 =====")
+        for key, value in stats.items():
+            log_message(f"{key}: {value}")
+
+        log_message(f"요약 파일 저장 완료: {summary_file}")
+        return summary_file, stats
+
+    except Exception as e:
+        log_message(f"요약 보고서 생성 오류: {str(e)}")
+        return None, {}
+
 def collect_bank_details():
     """각 은행별 상세 정보를 수집합니다."""
     bank_details = []

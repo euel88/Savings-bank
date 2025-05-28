@@ -14,6 +14,7 @@
 - 강화된 공시 날짜 확인 및 경고 기능 (분기말 + 2개월 후 마지막 평일 업로드 규칙 기반)
 - 더 견고해진 웹페이지 내 날짜 정보 추출 로직 적용
 - 동시성 제어(Semaphore) 및 날짜 형식 비교 오류 수정 (핫픽스)
+- Python 3.9 호환을 위한 타입 힌트 수정
 """
 
 import os
@@ -33,6 +34,7 @@ import logging
 from pathlib import Path
 import queue
 import traceback # main 예외 처리용
+from typing import Union # Python 3.9 호환성 위한 Union 타입 임포트
 
 # 이메일 전송 관련 임포트
 import smtplib
@@ -76,22 +78,16 @@ def setup_logging(log_file_path, log_level="INFO"):
 logger = None # Config 초기화 시 설정됨
 
 # --- 날짜 문자열 정규화 유틸리티 ---
-def normalize_datestr_for_comparison(datestr: str) -> str | None:
+def normalize_datestr_for_comparison(datestr: str) -> Union[str, None]: # 타입 힌트 수정
     """날짜 문자열을 'YYYY년M월말' 형태로 정규화하거나, 비교 불가능 시 None 반환."""
     if not datestr or datestr in ["날짜 정보 없음", "날짜 추출 실패"]:
         return None 
     match = re.search(r'(\d{4})년\s*(\d{1,2})월말', datestr)
     if match:
         year = int(match.group(1))
-        month = int(match.group(2)) # '09'는 9로, '9'는 9로 변환됨
+        month = int(match.group(2)) 
         return f"{year}년{month}월말"
-    # 정규식에 맞지 않는 경우, 원본이나 특정 문자열을 반환하여 비교 시 불일치를 유도할 수 있음
-    # 여기서는 None과 구분하기 위해 "알 수 없는 형식" 또는 원본을 반환할 수 있으나,
-    # 비교 로직에서 None 체크 후 바로 원본과 비교하므로, 원본을 반환하여 명시적 불일치를 유도.
-    # 또는 logger.warning(f"날짜 문자열 정규화 실패 (패턴 불일치): '{datestr}'") 후 None 반환도 가능.
-    # 현재는 비교 로직에서 알아서 처리하도록 원본을 반환하지 않고, 비교 실패를 유도하는 다른 값을 쓰거나, None을 반환.
-    # 여기서는 "알 수 없는 형식"을 반환하여 명확히 구분.
-    if logger: # logger가 설정된 경우에만 로깅 시도
+    if logger: 
         logger.warning(f"날짜 문자열 정규화 실패 (패턴 불일치): '{datestr}'")
     return "알 수 없는 형식"
 
@@ -129,7 +125,7 @@ class DateVerifier:
         return expected_period_str, full_reason
 
 # --- 이메일 전송 클래스 ---
-class EmailSender: # (이전과 동일)
+class EmailSender: 
     def __init__(self):
         self.smtp_server = "smtp.gmail.com"; self.smtp_port = 587
         self.sender_email = os.getenv('GMAIL_ADDRESS'); self.sender_password = os.getenv('GMAIL_APP_PASSWORD')
@@ -150,7 +146,7 @@ class EmailSender: # (이전과 동일)
                     encoders.encode_base64(part)
                     fname_enc = f"\"{os.path.basename(attachment_path)}\""
                     try: fname_enc = encoders.encode_rfc2231(os.path.basename(attachment_path))
-                    except: pass # Use basic if advanced encoding fails
+                    except: pass 
                     part.add_header('Content-Disposition', 'attachment', filename=fname_enc)
                     msg.attach(part)
                 if logger: logger.info(f"첨부 파일 추가: {attachment_path}")
@@ -166,12 +162,12 @@ class EmailSender: # (이전과 동일)
 # --- 설정 클래스 ---
 class Config:
     def __init__(self):
-        self.VERSION = "2.9.2-hotfix-concurrency-datefmt" 
+        self.VERSION = "2.9.3-py39-typehint-fix" # 버전 업데이트
         self.BASE_URL = "https://www.fsb.or.kr/busmagequar_0100.act"
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))
-        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '25')) # 워크플로우 기본값 반영
-        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '15')) # 워크플로우 기본값 반영
-        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '2')) # 워크플로우 기본값 반영
+        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '25'))
+        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '15'))
+        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '2')) 
 
         self.today = datetime.now().strftime("%Y%m%d")
         self.output_dir_base = Path(os.getenv('OUTPUT_DIR', "./output"))
@@ -217,7 +213,7 @@ class Config:
         logger.info(f"페이지 타임아웃: {self.PAGE_LOAD_TIMEOUT}s, 요소 대기 타임아웃: {self.WAIT_TIMEOUT}s")
 
 # --- 웹드라이버 관리 클래스 ---
-class DriverManager: # (이전과 거의 동일, _create_new_driver에 WebDriverException 로깅 강화)
+class DriverManager: 
     def __init__(self, config):
         self.config = config
         self.driver_pool = queue.Queue(maxsize=self.config.MAX_WORKERS)
@@ -248,7 +244,7 @@ class DriverManager: # (이전과 거의 동일, _create_new_driver에 WebDriver
                 logger.error("WebDriverException 관련 오류: ChromeDriver 또는 Chrome 브라우저를 찾을 수 없는 것 같습니다.")
                 logger.error(f"현재 시스템 PATH: {os.getenv('PATH')}")
             raise
-        except Exception as e: # Catch other potential errors during driver creation
+        except Exception as e: 
             logger.error(f"WebDriver 인스턴스 생성 중 예상치 못한 오류: {e}", exc_info=True)
             raise
 
@@ -264,7 +260,7 @@ class DriverManager: # (이전과 거의 동일, _create_new_driver에 WebDriver
         try: return self.driver_pool.get(block=True, timeout=60)
         except queue.Empty: raise TimeoutError(f"60초 대기 후에도 풀에서 드라이버를 가져오지 못함 (MAX_WORKERS: {self.config.MAX_WORKERS}).")
 
-    def return_driver(self, driver): # (이전과 동일)
+    def return_driver(self, driver): 
         if not driver: return
         returned = False
         try:
@@ -278,14 +274,14 @@ class DriverManager: # (이전과 거의 동일, _create_new_driver에 WebDriver
             except: pass 
             if not returned: self._add_new_driver_to_pool_if_needed()
             
-    def _add_new_driver_to_pool_if_needed(self): # (이전과 동일)
+    def _add_new_driver_to_pool_if_needed(self): 
         if self.driver_pool.qsize() < self.config.MAX_WORKERS:
             try:
                 logger.info("손상 드라이버 대체용 새 드라이버 생성 시도...")
                 self.driver_pool.put_nowait(self._create_new_driver())
             except Exception as e: logger.error(f"대체 드라이버 생성/추가 실패: {e}", exc_info=True)
 
-    def quit_all(self): # (이전과 동일)
+    def quit_all(self): 
         logger.info("모든 드라이버 종료 시작...")
         drained = 0
         while not self.driver_pool.empty():
@@ -295,7 +291,7 @@ class DriverManager: # (이전과 거의 동일, _create_new_driver에 WebDriver
 
 
 # --- 진행 상황 관리 클래스 ---
-class ProgressManager: # (이전과 거의 동일)
+class ProgressManager: 
     def __init__(self, config):
         self.config = config; self.progress_file_path = config.progress_file; self.progress = self._load()
     def _load(self):
@@ -347,8 +343,8 @@ class BankScraper:
             try: element.click(); return True
             except Exception as e: logger.warning(f"Robust 클릭 실패: {e}"); return False
 
-    def extract_date_information(self, driver): # 개선된 JS 로직 적용
-        logger.debug("날짜 정보 추출 시도 (개선된 로직 v2.9.2)...")
+    def extract_date_information(self, driver):
+        logger.debug(f"날짜 정보 추출 시도 (v{self.config.VERSION})...") # 버전 명시
         try:
             js_script = """
             var allMatches = [];
@@ -364,23 +360,36 @@ class BankScraper:
                 try { elements = document.querySelectorAll(tagsToSearch[i]); } catch (e) { elements = []; }
                 for (var j = 0; j < elements.length; j++) {
                     var elementText = elements[j].innerText || "";
-                    if (elementText.length > 3000) elementText = elementText.substring(0, 3000);
+                    if (elementText.length > 3000) elementText = elementText.substring(0, 3000); // 성능 위한 길이 제한
                     datePattern.lastIndex = 0;
                     while ((match = datePattern.exec(elementText)) !== null) {
                         var cY = parseInt(match[1]), cM = parseInt(match[2]);
-                        if (!allMatches.some(m => m.year === cY && m.month === cM && m.fullText.replace(/\s+/g,'') === match[0].replace(/\s+/g,''))) {
-                            allMatches.push({fullText: match[0], year: cY, month: cM});
+                        // 중복 최소화: 정규화된 텍스트와 연/월까지 같은 경우만 중복으로 간주하지 않음 (소스가 다르면 다른 컨텍스트일 수 있음)
+                        // 좀 더 정확한 중복 제거는 year, month만 비교
+                        if (!allMatches.some(m => m.year === cY && m.month === cM)) { // 연, 월이 같은 데이터는 이미 추가된 것으로 간주 (첫 발견 우선)
+                             allMatches.push({fullText: match[0], year: cY, month: cM});
+                        } else { // 이미 같은 연/월의 데이터가 있다면, fullText가 다른 경우(예: 공백차이)에만 업데이트 시도 또는 로그
+                            var existing = allMatches.find(m => m.year === cY && m.month === cM);
+                            // 이 부분은 필요시 정교화. 현재는 첫 발견된 연/월 텍스트를 유지.
                         }
                     }
                 }
             }
             if (allMatches.length === 0) return '날짜 정보 없음';
             allMatches.sort((a,b) => (b.year !== a.year) ? (b.year - a.year) : (b.month - a.month));
+            
             var sysYear = new Date().getFullYear();
-            var latestFYear = allMatches[0].year;
-            var reasonableDates = allMatches.filter(m => !(m.year < latestFYear - 5 && m.year < sysYear - 3) && m.year >= sysYear - 10);
+            var latestFYear = allMatches[0].year; // 정렬 후 가장 최신 연도
+            
+            var reasonableDates = allMatches.filter(m => {
+                // 너무 오래된 날짜 필터링 강화: 최신 발견 연도보다 5년 이상 차이나면서, 동시에 시스템 연도보다 3년 이상 차이나면 제외
+                if (m.year < latestFYear - 5 && m.year < sysYear - 3) return false;
+                // 최소한 시스템 연도 기준 10년 이내 데이터만 고려
+                return m.year >= sysYear - 10; 
+            });
+            
             if (reasonableDates.length > 0) return reasonableDates[0].fullText.replace(/\s+/g, '');
-            if (allMatches.length > 0) return allMatches[0].fullText.replace(/\s+/g, '');
+            if (allMatches.length > 0) return allMatches[0].fullText.replace(/\s+/g, ''); // 합리적 날짜 없으면 모든것 중 최신
             return '날짜 정보 없음';
             """
             date_info = driver.execute_script(js_script)
@@ -390,7 +399,7 @@ class BankScraper:
             logger.error(f"날짜 정보 추출 중 오류 (개선된 로직): {e}", exc_info=True)
             return "날짜 추출 실패"
 
-    def select_bank(self, driver, bank_name): # (이전과 동일 - 시간 최적화된 버전)
+    def select_bank(self, driver, bank_name):
         logger.debug(f"[{bank_name}] 은행 선택..."); driver.get(self.config.BASE_URL)
         WebDriverWait(driver,self.config.PAGE_LOAD_TIMEOUT).until(lambda d:d.execute_script('return document.readyState')=='complete'); time.sleep(random.uniform(0.4,0.8))
         for xp in [f"//td[normalize-space(.)='{bank_name}']", f"//a[normalize-space(.)='{bank_name}']"]:
@@ -410,7 +419,7 @@ class BankScraper:
             except: pass
         logger.warning(f"[{bank_name}] 은행 선택 최종 실패."); return False
 
-    def select_category(self, driver, category_name): # (이전과 동일 - 시간 최적화된 버전)
+    def select_category(self, driver, category_name):
         logger.debug(f"카테고리 선택: '{category_name}'"); time.sleep(random.uniform(0.2,0.5))
         cat_norm=category_name.replace(' ','')
         sels=[(By.XPATH,f"//a[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),(By.XPATH,f"//button[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),(By.LINK_TEXT,category_name),(By.PARTIAL_LINK_TEXT,category_name)]
@@ -425,7 +434,7 @@ class BankScraper:
         except: pass
         logger.warning(f"'{category_name}' 카테고리 선택 최종 실패."); return False
         
-    def extract_tables_from_page(self, driver): # (이전과 동일 - 시간 최적화된 버전)
+    def extract_tables_from_page(self, driver):
         WebDriverWait(driver,self.config.PAGE_LOAD_TIMEOUT).until(lambda d:d.execute_script('return document.readyState')=='complete'); time.sleep(random.uniform(0.3,0.6))
         try:
             src=driver.page_source;
@@ -445,17 +454,17 @@ class BankScraper:
         logger.info(f"[{bank_name}] 스크래핑 시도...")
         if not self.select_bank(driver, bank_name): return None
 
-        date_info_scraped = self.extract_date_information(driver) # 개선된 JS 로직 사용
+        date_info_scraped = self.extract_date_information(driver)
         logger.info(f"[{bank_name}] 추출 공시일(원본): '{date_info_scraped}'")
         
         normalized_scraped_date = normalize_datestr_for_comparison(date_info_scraped)
-        expected_period = self.config.expected_latest_disclosure_period # 이미 "YYYY년M월말"
+        expected_period = self.config.expected_latest_disclosure_period
 
         logger.info(f"[{bank_name}] 정규화 공시일: '{normalized_scraped_date}', 예상 공시일: '{expected_period}'")
 
         if normalized_scraped_date is None:
             logger.error(f"[{bank_name}] 날짜 추출 실패 또는 정보 없음. 예상일('{expected_period}')과 비교 불가.")
-        elif normalized_scraped_date == "알 수 없는 형식": # normalize_datestr_for_comparison이 패턴 못찾을때
+        elif normalized_scraped_date == "알 수 없는 형식":
              logger.warning(f"[{bank_name}] 날짜 형식을 알 수 없음: '{date_info_scraped}'. 예상일('{expected_period}')과 비교 불가.")
         elif normalized_scraped_date != expected_period:
             logger.critical(f"[{bank_name}] !!날짜 불일치!! 웹사이트(정규화): '{normalized_scraped_date}', 예상: '{expected_period}'. (사이트 원본: '{date_info_scraped}', 판단근거: {self.config.expected_period_reason})")
@@ -476,7 +485,7 @@ class BankScraper:
                 has_data = True
         return data if has_data else None
 
-    def save_bank_data(self, bank_name, excel_data_dict): # (이전과 동일)
+    def save_bank_data(self, bank_name, excel_data_dict):
         raw_date = excel_data_dict['_INFO_']['공시날짜'].iloc[0]
         match = re.search(r'(\d{4})년(\d{1,2})월', raw_date)
         date_fn = f"{match.group(1)}-{int(match.group(2)):02d}" if match else re.sub(r'[^\w\-_.]', '', raw_date or "날짜정보없음")
@@ -500,9 +509,9 @@ class BankScraper:
                         data = self._scrape_single_bank_attempt(bank_name, driver)
                         if data: date_info = data['_INFO_']['공시날짜'].iloc[0]; break
                     except Exception as e: 
-                        logger.warning(f"[{bank_name}] 시도 {attempt+1} 중 예외: {type(e).__name__} - {e}") # Log exception type
+                        logger.warning(f"[{bank_name}] 시도 {attempt+1} 중 예외: {type(e).__name__} - {e}")
                         if attempt < self.config.MAX_RETRIES-1:
-                            await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.return_driver, driver); driver = None # Mark driver as potentially bad
+                            await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.return_driver, driver); driver = None
                             driver = await asyncio.get_event_loop().run_in_executor(None, self.driver_manager.get_driver)
                             if not driver: logger.error(f"[{bank_name}] 재시도용 드라이버 획득 실패."); break
                         else: data = None; logger.error(f"[{bank_name}] 모든 재시도 실패.")
@@ -510,7 +519,7 @@ class BankScraper:
                     self.progress_manager.mark_completed(bank_name, date_info); success = True
                 else: self.progress_manager.mark_failed(bank_name)
                 return bank_name, success, date_info
-            except TimeoutError as te: # Specifically for get_driver timeout
+            except TimeoutError as te: 
                 logger.error(f"[{bank_name}] 드라이버 획득 타임아웃: {te}"); self.progress_manager.mark_failed(bank_name); return bank_name, False, date_info
             except Exception as e: 
                 logger.error(f"[{bank_name}] 작업자 예외: {type(e).__name__} - {e}", exc_info=True); self.progress_manager.mark_failed(bank_name); return bank_name, False, date_info
@@ -519,7 +528,7 @@ class BankScraper:
                 if pbar: pbar.update(1)
                 logger.info(f"[{bank_name}] 처리: {'성공' if success else '실패'}, 공시일(원본): {date_info or '미확정'}")
     
-    async def run(self): # Semaphore 생성 위치 수정됨
+    async def run(self):
         logger.info(f"==== 스크래핑 시작 (v{self.config.VERSION}) ====")
         start_time = time.monotonic()
         pending = self.progress_manager.get_pending_banks()
@@ -537,19 +546,18 @@ class BankScraper:
         logger.info(f"==== 전체 스크래핑 완료. 소요시간: {time.monotonic() - start_time:.2f}초 ====")
         self.generate_summary_and_send_email()
 
-    def generate_summary_and_send_email(self): # 날짜 확인 상태 로직에서 정규화된 날짜 비교
+    def generate_summary_and_send_email(self):
         logger.info("요약 보고서 및 이메일 생성 시작...")
         summary, banks_cfg = [], self.config.BANKS
         processed = self.progress_manager.progress.get('banks', {})
-        expected_date_normalized = self.config.expected_latest_disclosure_period # 이미 "YYYY년M월말"
-        
+        expected_date_normalized = self.config.expected_latest_disclosure_period
         comp, fail = 0,0; failed_names = []
 
         for bn in banks_cfg:
             detail = processed.get(bn); status, original_disc_date, match_status = '미처리', '', ''
             if detail:
                 current_status = detail.get('status')
-                original_disc_date = detail.get('date_info', '') # 원본 저장된 날짜
+                original_disc_date = detail.get('date_info', '') 
                 normalized_disc_date = normalize_datestr_for_comparison(original_disc_date)
 
                 if current_status == 'completed':
@@ -582,7 +590,7 @@ class BankScraper:
         failed_disp = "".join(f"<li>{b}</li>" for b in failed_names[:10]) + (f"<p>...외 {len(failed_names)-10}개.</p>" if len(failed_names)>10 else ("없음" if not failed_names else ""))
         
         body_html = f"""
-        <html><head><style> /* CSS 축약 */
+        <html><head><style>
             body{{font-family:Arial,sans-serif;margin:20px}} h2{{color:#2c3e50}}
             .summary-box{{border:1px solid #ddd;padding:15px;margin-bottom:20px;background-color:#f9f9f9;border-radius:5px}}
             .summary-box p{{margin:5px 0}} .status-completed{{color:green}} .status-failed{{color:red}}
@@ -603,7 +611,7 @@ class BankScraper:
         </body></html>"""
         
         attach_path = str(zip_fp) if zip_fp and zip_fp.exists() else (str(summary_fp) if summary_fp.exists() else None)
-        if attach_path and Path(attach_path).name == summary_filename and zip_fp is None : logger.warning("압축 파일 생성 실패. 요약 보고서만 첨부.")
+        if attach_path and Path(attach_path).name == summary_filename and zip_fp is None : logger.warning("압축 파일 생성 실패 또는 누락. 요약 보고서만 첨부합니다.")
         elif not attach_path: logger.warning("압축 파일 및 요약 보고서 모두 누락. 첨부 파일 없이 발송.")
         self.email_sender.send_email_with_attachment(email_subject, body_html, attach_path)
 

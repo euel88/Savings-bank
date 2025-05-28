@@ -10,6 +10,7 @@ GitHub Actions 환경용 개선사항:
 - 이메일 알림 기능 추가
 - 데이터 날짜 검증 로직 추가
 - 상대 경로 사용
+- 정확한 은행명 매칭 로직 개선
 """
 
 import os
@@ -642,124 +643,35 @@ def select_bank(driver, bank_name):
         WaitUtils.wait_for_page_load(driver)
         WaitUtils.wait_with_random(1, 2)
 
-        # 개선된 JavaScript 기반 은행 선택 (정확한 매칭 우선)
+        # 단순하고 안전한 JavaScript 기반 은행 선택
         js_script = f"""
         var targetBank = '{bank_name}';
         var allElements = document.querySelectorAll('a, td, th, span, div');
         var exactMatches = [];
-        var partialMatches = [];
+        var limitedMatches = [];
         
-        // 1단계: 모든 요소를 스캔하여 정확한 매칭과 부분 매칭을 분류
+        // 모든 요소를 스캔하여 매칭 우선순위별로 분류
         for(var i = 0; i < allElements.length; i++) {{
             var element = allElements[i];
             var text = element.textContent.trim();
             
-            // 정확한 일치 (완전히 동일한 텍스트)
+            // 1순위: 완전히 동일한 텍스트
             if(text === targetBank) {{
-                exactMatches.push({{element: element, text: text, type: 'exact'}});
+                exactMatches.push(element);
             }}
-            // 단어 경계를 고려한 정확한 매칭 (앞뒤에 공백이나 특수문자가 있는 경우)
-            else if(text.match(new RegExp('\\\\b' + targetBank.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\def select_bank(driver, bank_name):
-    """다양한 방법으로 은행을 선택합니다."""
-    try:
-        # 메인 페이지로 접속
-        driver.get(BASE_URL)
-        WaitUtils.wait_for_page_load(driver)
-        WaitUtils.wait_with_random(1, 2)
-
-        # JavaScript를 사용한 은행 선택 (가장 확실한 방법)
-        js_script = f"""
-        // 모든 링크와 테이블 셀에서 은행명 검색
-        var allElements = document.querySelectorAll('a, td, th, span, div');
-        var targetBank = '{bank_name}';
-        
-        for(var i = 0; i < allElements.length; i++) {{
-            var element = allElements[i];
-            var text = element.textContent.trim();
-            
-            // 정확한 일치 우선
-            if(text === targetBank) {{
-                element.scrollIntoView({{block: 'center'}});
-                if(element.tagName.toLowerCase() === 'a') {{
-                    element.click();
-                    return 'exact_link_click';
-                }}
-                // 링크가 아니면 내부 링크 찾기
-                var links = element.querySelectorAll('a');
-                if(links.length > 0) {{
-                    links[0].click();
-                    return 'exact_nested_link_click';
-                }}
-                element.click();
-                return 'exact_element_click';
-            }}
-            
-            // 부분 일치
-            if(text.includes(targetBank) && text.length < targetBank.length + 10) {{
-                element.scrollIntoView({{block: 'center'}});
-                if(element.tagName.toLowerCase() === 'a') {{
-                    element.click();
-                    return 'partial_link_click';
-                }}
-                var links = element.querySelectorAll('a');
-                if(links.length > 0) {{
-                    links[0].click();
-                    return 'partial_nested_link_click';
-                }}
-                element.click();
-                return 'partial_element_click';
+            // 2순위: 은행명을 포함하되 길이가 제한된 텍스트 (중복 방지)
+            else if(text.indexOf(targetBank) !== -1 && 
+                    text.length <= targetBank.length * 2 && 
+                    text.length > targetBank.length) {{
+                limitedMatches.push(element);
             }}
         }}
         
-        return false;
-        """
+        // 정확한 매칭부터 우선 시도
+        var allCandidates = exactMatches.concat(limitedMatches);
         
-        result = driver.execute_script(js_script)
-        if result:
-            log_message(f"{bank_name} 은행: JavaScript {result} 성공", verbose=False)
-            WaitUtils.wait_with_random(1, 2)
-            return True
-
-        # Selenium을 사용한 대체 방법들
-        bank_xpaths = [
-            f"//td[text()='{bank_name}']//a | //a[text()='{bank_name}']",
-            f"//td[contains(text(), '{bank_name}')]//a | //a[contains(text(), '{bank_name}')]",
-            f"//*[contains(text(), '{bank_name}') and (self::a or descendant::a)]"
-        ]
-
-        for xpath in bank_xpaths:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
-                for element in elements:
-                    if element.is_displayed():
-                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                        WaitUtils.wait_with_random(0.5, 1)
-                        driver.execute_script("arguments[0].click();", element)
-                        WaitUtils.wait_with_random(1, 2)
-                        return True
-            except Exception:
-                continue
-
-        log_message(f"{bank_name} 은행을 찾을 수 없습니다.")
-        return False
-
-    except Exception as e:
-        log_message(f"{bank_name} 은행 선택 실패: {str(e)}")
-        return False') + '\\\\b'))) {{
-                exactMatches.push({{element: element, text: text, type: 'word_boundary'}});
-            }}
-            // 부분 일치는 매우 제한적으로만 허용 (텍스트 길이가 은행명의 1.5배 이하인 경우만)
-            else if(text.includes(targetBank) && text.length <= targetBank.length * 1.5 && text.length > targetBank.length) {{
-                partialMatches.push({{element: element, text: text, type: 'partial'}});
-            }}
-        }}
-        
-        // 2단계: 정확한 매칭부터 우선적으로 처리
-        var candidatesToTry = exactMatches.concat(partialMatches);
-        
-        for(var i = 0; i < candidatesToTry.length; i++) {{
-            var candidate = candidatesToTry[i];
-            var element = candidate.element;
+        for(var i = 0; i < allCandidates.length; i++) {{
+            var element = allCandidates[i];
             
             try {{
                 // 요소가 화면에 보이는지 확인
@@ -770,21 +682,21 @@ def select_bank(driver, bank_name):
                 // 링크인 경우 직접 클릭
                 if(element.tagName.toLowerCase() === 'a') {{
                     element.click();
-                    return candidate.type + '_direct_link';
+                    return 'direct_link_' + (i < exactMatches.length ? 'exact' : 'limited');
                 }}
                 
                 // 링크가 아닌 경우 내부에서 링크 찾기
                 var links = element.querySelectorAll('a');
                 if(links.length > 0) {{
                     links[0].click();
-                    return candidate.type + '_nested_link';
+                    return 'nested_link_' + (i < exactMatches.length ? 'exact' : 'limited');
                 }}
                 
                 // 그 외의 경우 요소 자체 클릭
                 element.click();
-                return candidate.type + '_element_click';
+                return 'element_click_' + (i < exactMatches.length ? 'exact' : 'limited');
             }} catch(e) {{
-                continue; // 클릭 실패 시 다음 후보로 이동
+                continue;
             }}
         }}
         
@@ -797,11 +709,15 @@ def select_bank(driver, bank_name):
             WaitUtils.wait_with_random(1, 2)
             return True
 
-        # JavaScript 실패 시 Selenium 기반 대체 방법 (정확한 매칭 우선)
-        # 1. 정확한 텍스트 매칭 우선
+        # JavaScript 실패 시 Selenium 기반 대체 방법
+        log_message(f"{bank_name} 은행: JavaScript 방법 실패, Selenium 시도", verbose=False)
+        
+        # 1단계: 정확한 텍스트 매칭
         exact_xpaths = [
-            f"//td[normalize-space(text())='{bank_name}']//a | //a[normalize-space(text())='{bank_name}']",
-            f"//td[text()='{bank_name}']//a | //a[text()='{bank_name}']"
+            f"//td[normalize-space(text())='{bank_name}']//a",
+            f"//a[normalize-space(text())='{bank_name}']",
+            f"//td[text()='{bank_name}']//a",
+            f"//a[text()='{bank_name}']"
         ]
         
         for xpath in exact_xpaths:
@@ -818,25 +734,43 @@ def select_bank(driver, bank_name):
             except Exception:
                 continue
 
-        # 2. 제한적 부분 매칭 (정확한 매칭 실패 시에만)
+        # 2단계: 제한적 부분 매칭 (정확한 매칭 실패 시에만)
         log_message(f"{bank_name} 은행: 정확한 매칭 실패, 제한적 부분 매칭 시도", verbose=False)
         
-        # 부분 매칭을 위한 더 정교한 XPath
-        partial_xpath = f"//td[contains(text(), '{bank_name}') and string-length(text()) <= {len(bank_name) * 2}]//a | //a[contains(text(), '{bank_name}') and string-length(text()) <= {len(bank_name) * 2}]"
-        
         try:
-            elements = driver.find_elements(By.XPATH, partial_xpath)
-            for element in elements:
-                element_text = element.text.strip()
-                # 추가 검증: 은행명이 포함되어 있지만 너무 다르지 않은 경우만 허용
-                if bank_name in element_text and len(element_text) <= len(bank_name) * 1.5:
-                    if element.is_displayed():
+            # 모든 테이블 셀과 링크를 가져와서 수동으로 필터링
+            all_elements = driver.find_elements(By.XPATH, "//td | //a")
+            
+            for element in all_elements:
+                try:
+                    element_text = element.text.strip()
+                    # 은행명을 포함하고, 길이가 적절한 범위 내에 있는 경우만 허용
+                    if (bank_name in element_text and 
+                        len(element_text) <= len(bank_name) * 2 and
+                        len(element_text) > len(bank_name) and
+                        element.is_displayed()):
+                        
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
                         WaitUtils.wait_with_random(0.5, 1)
-                        driver.execute_script("arguments[0].click();", element)
+                        
+                        # 링크인 경우 직접 클릭
+                        if element.tag_name.lower() == 'a':
+                            driver.execute_script("arguments[0].click();", element)
+                        else:
+                            # 링크가 아닌 경우 내부 링크 찾기
+                            links = element.find_elements(By.TAG_NAME, "a")
+                            if links:
+                                driver.execute_script("arguments[0].click();", links[0])
+                            else:
+                                driver.execute_script("arguments[0].click();", element)
+                        
                         WaitUtils.wait_with_random(1, 2)
-                        log_message(f"{bank_name} 은행: Selenium 제한적 부분 매칭 성공 (매칭된 텍스트: {element_text})", verbose=False)
+                        log_message(f"{bank_name} 은행: Selenium 제한적 매칭 성공 (매칭된 텍스트: {element_text})", verbose=False)
                         return True
+                        
+                except Exception:
+                    continue
+                    
         except Exception:
             pass
 
@@ -1546,121 +1480,6 @@ def collect_bank_details():
     except Exception as e:
         log_message(f"은행 상세 정보 수집 실패: {str(e)}")
         return []
-    """스크래핑 결과 요약 보고서를 생성합니다."""
-    try:
-        progress_manager = ProgressManager()
-        completed_banks = progress_manager.progress.get('completed', [])
-        failed_banks = progress_manager.progress.get('failed', [])
-        validation_data = progress_manager.progress.get('data_validation', [])
-
-        # 은행별 데이터 요약
-        bank_summary = []
-        validation_dict = {item['bank_name']: item for item in validation_data}
-
-        for bank in BANKS:
-            # 각 은행의 엑셀 파일 찾기
-            bank_files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(f"{bank}_") and f.endswith(".xlsx")]
-
-            if bank_files:
-                try:
-                    # 가장 최근 파일 선택
-                    latest_file = sorted(bank_files)[-1]
-                    file_path = os.path.join(OUTPUT_DIR, latest_file)
-
-                    # 엑셀 파일 분석
-                    xls = pd.ExcelFile(file_path)
-                    sheet_count = len(xls.sheet_names)
-
-                    # 카테고리 추출
-                    categories = []
-                    for sheet in xls.sheet_names:
-                        if sheet != '공시정보':
-                            category = sheet.split('_')[0] if '_' in sheet else sheet
-                            categories.append(category)
-
-                    categories = sorted(list(set(categories)))
-
-                    # 공시 정보에서 날짜 및 검증 결과 추출
-                    date_info = "날짜 정보 없음"
-                    validation_result = "검증 없음"
-                    data_freshness = "알 수 없음"
-                    
-                    if '공시정보' in xls.sheet_names:
-                        info_df = pd.read_excel(file_path, sheet_name='공시정보')
-                        if '공시 날짜' in info_df.columns and not info_df['공시 날짜'].empty:
-                            date_info = str(info_df['공시 날짜'].iloc[0])
-                        if '검증 결과' in info_df.columns and not info_df['검증 결과'].empty:
-                            validation_result = str(info_df['검증 결과'].iloc[0])
-                        if '데이터 신선도' in info_df.columns and not info_df['데이터 신선도'].empty:
-                            data_freshness = str(info_df['데이터 신선도'].iloc[0])
-
-                    # 상태 결정
-                    status = '완료' if set(categories) >= set(CATEGORIES) else '부분 완료'
-
-                    bank_summary.append({
-                        '은행명': bank,
-                        '스크래핑 상태': status,
-                        '공시 날짜': date_info,
-                        '데이터 신선도': data_freshness,
-                        '검증 결과': validation_result,
-                        '시트 수': sheet_count - 1,  # 공시정보 시트 제외
-                        '스크래핑된 카테고리': ', '.join(categories)
-                    })
-                    
-                except Exception as e:
-                    bank_summary.append({
-                        '은행명': bank,
-                        '스크래핑 상태': '파일 손상',
-                        '공시 날짜': '확인 불가',
-                        '데이터 신선도': '확인 불가',
-                        '검증 결과': f'오류: {str(e)}',
-                        '시트 수': '확인 불가',
-                        '스크래핑된 카테고리': ''
-                    })
-            else:
-                status = '실패' if bank in failed_banks else '미처리'
-                validation_info = validation_dict.get(bank, {})
-                
-                bank_summary.append({
-                    '은행명': bank,
-                    '스크래핑 상태': status,
-                    '공시 날짜': validation_info.get('date_info', ''),
-                    '데이터 신선도': '최신' if validation_info.get('is_fresh', False) else '구버전',
-                    '검증 결과': '검증 완료' if bank in validation_dict else '검증 안됨',
-                    '시트 수': 0,
-                    '스크래핑된 카테고리': ''
-                })
-
-        # 요약 DataFrame 생성 및 정렬
-        summary_df = pd.DataFrame(bank_summary)
-        status_order = {'완료': 0, '부분 완료': 1, '파일 손상': 2, '실패': 3, '미처리': 4}
-        summary_df['상태순서'] = summary_df['스크래핑 상태'].map(status_order)
-        summary_df = summary_df.sort_values(['상태순서', '은행명']).drop('상태순서', axis=1)
-
-        # 요약 파일 저장
-        summary_file = os.path.join(OUTPUT_DIR, f"스크래핑_요약_{TODAY}.xlsx")
-        summary_df.to_excel(summary_file, index=False)
-
-        # 통계 정보 계산
-        stats = {
-            '전체 은행 수': len(BANKS),
-            '완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '완료']),
-            '부분 완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '부분 완료']),
-            '실패 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] in ['실패', '파일 손상']]),
-            '최신 데이터 은행 수': len([r for r in bank_summary if r['데이터 신선도'] == '최신']),
-            '성공률': f"{len([r for r in bank_summary if r['스크래핑 상태'] in ['완료', '부분 완료']]) / len(BANKS) * 100:.2f}%"
-        }
-
-        log_message("\n===== 스크래핑 결과 요약 =====")
-        for key, value in stats.items():
-            log_message(f"{key}: {value}")
-
-        log_message(f"요약 파일 저장 완료: {summary_file}")
-        return summary_file, stats
-
-    except Exception as e:
-        log_message(f"요약 보고서 생성 오류: {str(e)}")
-        return None, {}
 
 def create_zip_archive():
     """결과 파일들을 ZIP으로 압축합니다."""
@@ -1799,7 +1618,7 @@ def main():
 자세한 내용은 첨부된 로그 파일을 확인해주세요.
 """
             attachments = [LOG_FILE] if os.path.exists(LOG_FILE) else []
-            send_email_notification(error_subject, error_body, attachments, False)
+            send_email_notification(error_subject, error_body, None, attachments, False)
 
 if __name__ == "__main__":
     main()

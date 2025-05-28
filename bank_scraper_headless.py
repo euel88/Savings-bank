@@ -109,31 +109,77 @@ def log_message(message, print_to_console=True, verbose=True):
 def validate_data_freshness():
     """
     현재 날짜를 기준으로 예상되는 최신 데이터 분기를 계산합니다.
-    각 분기말(3월말, 6월말, 9월말) 종료 후 2개월 후 마지막 평일에 업로드됨.
+    각 분기말(3월말, 6월말, 9월말, 12월말) 종료 후 2개월 후 마지막 평일에 업로드됨.
+    
+    업로드 스케줄:
+    - 3월말 데이터 → 5월 마지막 평일
+    - 6월말 데이터 → 8월 마지막 평일
+    - 9월말 데이터 → 11월 마지막 평일
+    - 12월말 데이터 → 2월 마지막 평일
     """
     try:
         current_date = datetime.now()
         current_year = current_date.year
         current_month = current_date.month
+        current_day = current_date.day
         
-        # 분기별 예상 업로드 월: 3월말 -> 5월, 6월말 -> 8월, 9월말 -> 11월, 12월말 -> 2월(다음해)
-        if current_month >= 11:  # 11월, 12월
-            expected_quarter_end = f"{current_year}년9월말"
-            next_expected_quarter_end = f"{current_year}년12월말"
-        elif current_month >= 8:  # 8월, 9월, 10월
-            expected_quarter_end = f"{current_year}년6월말"
-            next_expected_quarter_end = f"{current_year}년9월말"
-        elif current_month >= 5:  # 5월, 6월, 7월
+        # 마지막 평일 계산을 위한 함수
+        def get_last_weekday_of_month(year, month):
+            import calendar
+            last_day = calendar.monthrange(year, month)[1]
+            for day in range(last_day, 0, -1):
+                if datetime(year, month, day).weekday() < 5:  # 월요일(0) ~ 금요일(4)
+                    return day
+            return last_day
+        
+        # 현재 월의 마지막 평일이 지났는지 확인
+        last_weekday_current_month = get_last_weekday_of_month(current_year, current_month)
+        is_past_last_weekday = current_day > last_weekday_current_month
+        
+        # 분기별 예상 업로드 월과 데이터 분기 계산
+        if current_month == 11 or (current_month == 12) or (current_month == 1) or (current_month == 2 and not is_past_last_weekday):
+            # 11월, 12월, 1월, 2월 마지막평일 전 → 9월말 데이터가 최신
+            expected_quarter_end = f"{current_year if current_month >= 11 else current_year-1}년9월말"
+            next_expected_quarter_end = f"{current_year if current_month <= 2 else current_year-1}년12월말"
+        elif current_month == 2 and is_past_last_weekday:
+            # 2월 마지막평일 후 → 12월말 데이터가 업로드됨
+            expected_quarter_end = f"{current_year-1}년12월말"
+            next_expected_quarter_end = f"{current_year}년3월말"
+        elif current_month in [3, 4] or (current_month == 5 and not is_past_last_weekday):
+            # 3월, 4월, 5월 마지막평일 전 → 12월말 데이터가 최신
+            expected_quarter_end = f"{current_year-1}년12월말"
+            next_expected_quarter_end = f"{current_year}년3월말"
+        elif current_month == 5 and is_past_last_weekday:
+            # 5월 마지막평일 후 → 3월말 데이터가 업로드됨
             expected_quarter_end = f"{current_year}년3월말"
             next_expected_quarter_end = f"{current_year}년6월말"
-        else:  # 1월, 2월, 3월, 4월
+        elif current_month in [6, 7] or (current_month == 8 and not is_past_last_weekday):
+            # 6월, 7월, 8월 마지막평일 전 → 3월말 데이터가 최신
+            expected_quarter_end = f"{current_year}년3월말"
+            next_expected_quarter_end = f"{current_year}년6월말"
+        elif current_month == 8 and is_past_last_weekday:
+            # 8월 마지막평일 후 → 6월말 데이터가 업로드됨
+            expected_quarter_end = f"{current_year}년6월말"
+            next_expected_quarter_end = f"{current_year}년9월말"
+        elif current_month in [9, 10] or (current_month == 11 and not is_past_last_weekday):
+            # 9월, 10월, 11월 마지막평일 전 → 6월말 데이터가 최신
+            expected_quarter_end = f"{current_year}년6월말"
+            next_expected_quarter_end = f"{current_year}년9월말"
+        else:
+            # 기본값 (예외 상황)
             expected_quarter_end = f"{current_year-1}년12월말"
             next_expected_quarter_end = f"{current_year}년3월말"
         
-        # 다음 분기 데이터가 일찍 업로드될 가능성도 고려
+        # 현재가 5월이고 아직 마지막 평일이 지나지 않았다면, 2024년 9월말이 최신
+        if current_month == 5 and not is_past_last_weekday:
+            expected_quarter_end = f"{current_year-1}년9월말"
+            next_expected_quarter_end = f"{current_year}년3월말"
+        
         possible_dates = [expected_quarter_end, next_expected_quarter_end]
         
         log_message(f"현재 날짜: {current_date.strftime('%Y년 %m월 %d일')}")
+        log_message(f"이번 달 마지막 평일: {current_month}월 {last_weekday_current_month}일")
+        log_message(f"마지막 평일 경과 여부: {'예' if is_past_last_weekday else '아니오'}")
         log_message(f"예상 최신 데이터 분기: {expected_quarter_end}")
         log_message(f"조기 업로드 가능 분기: {next_expected_quarter_end}")
         
@@ -141,9 +187,9 @@ def validate_data_freshness():
         
     except Exception as e:
         log_message(f"데이터 신선도 검증 오류: {str(e)}")
-        return [f"{current_year}년{((current_month-1)//3)*3+3}월말"]
+        return [f"{current_year-1}년9월말", f"{current_year}년3월말"]
 
-def send_email_notification(subject, body, attachment_paths=None, is_success=True):
+def send_email_notification(subject, body, bank_details=None, attachment_paths=None, is_success=True):
     """Gmail SMTP를 통해 이메일 알림을 발송합니다."""
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD or not RECIPIENT_EMAILS:
         log_message("이메일 설정이 불완전하여 알림을 발송하지 않습니다.")
@@ -156,8 +202,49 @@ def send_email_notification(subject, body, attachment_paths=None, is_success=Tru
         msg['To'] = ', '.join(RECIPIENT_EMAILS)
         msg['Subject'] = subject
         
+        # 은행별 상세 정보를 본문에 추가
+        enhanced_body = body
+        if bank_details:
+            enhanced_body += "\n\n===== 은행별 상세 결과 =====\n"
+            
+            # 성공한 은행들
+            successful_banks = [bank for bank in bank_details if bank['status'] == 'success']
+            if successful_banks:
+                enhanced_body += f"\n✅ 성공한 은행 ({len(successful_banks)}개):\n"
+                for bank in successful_banks:
+                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+            
+            # 부분 성공한 은행들  
+            partial_banks = [bank for bank in bank_details if bank['status'] == 'partial']
+            if partial_banks:
+                enhanced_body += f"\n⚠️ 부분 성공한 은행 ({len(partial_banks)}개):\n"
+                for bank in partial_banks:
+                    enhanced_body += f"  • {bank['name']}: {bank['date_info']} (일부 카테고리 누락)\n"
+            
+            # 실패한 은행들
+            failed_banks = [bank for bank in bank_details if bank['status'] == 'failed']
+            if failed_banks:
+                enhanced_body += f"\n❌ 실패한 은행 ({len(failed_banks)}개):\n"
+                for bank in failed_banks:
+                    enhanced_body += f"  • {bank['name']}: {bank.get('error_reason', '알 수 없는 오류')}\n"
+            
+            # 데이터 신선도별 분류
+            enhanced_body += "\n\n===== 데이터 신선도별 분류 =====\n"
+            fresh_banks = [bank for bank in bank_details if bank.get('is_fresh', False)]
+            old_banks = [bank for bank in bank_details if not bank.get('is_fresh', False) and bank['status'] in ['success', 'partial']]
+            
+            if fresh_banks:
+                enhanced_body += f"\n🟢 최신 데이터 은행 ({len(fresh_banks)}개):\n"
+                for bank in fresh_banks:
+                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+            
+            if old_banks:
+                enhanced_body += f"\n🟡 구버전 데이터 은행 ({len(old_banks)}개):\n"
+                for bank in old_banks:
+                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+        
         # 본문 추가
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        msg.attach(MIMEText(enhanced_body, 'plain', 'utf-8'))
         
         # 첨부 파일 추가
         if attachment_paths:
@@ -1108,7 +1195,85 @@ def process_with_retry(banks, max_retries=1):
         # 드라이버 정리
         driver_manager.close_all()
 
-def generate_summary_report():
+def collect_bank_details():
+    """각 은행별 상세 정보를 수집합니다."""
+    bank_details = []
+    progress_manager = ProgressManager()
+    
+    try:
+        # 진행 상황에서 검증 데이터 가져오기
+        validation_data = progress_manager.progress.get('data_validation', [])
+        validation_dict = {item['bank_name']: item for item in validation_data}
+        
+        for bank in BANKS:
+            bank_info = {
+                'name': bank,
+                'status': 'failed',
+                'date_info': '데이터 없음',
+                'is_fresh': False,
+                'categories': [],
+                'error_reason': '처리되지 않음'
+            }
+            
+            # 각 은행의 엑셀 파일 찾기
+            bank_files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(f"{bank}_") and f.endswith(".xlsx")]
+            
+            if bank_files:
+                try:
+                    # 가장 최근 파일 선택
+                    latest_file = sorted(bank_files)[-1]
+                    file_path = os.path.join(OUTPUT_DIR, latest_file)
+                    
+                    # 엑셀 파일 분석
+                    xls = pd.ExcelFile(file_path)
+                    
+                    # 카테고리 추출
+                    categories = []
+                    for sheet in xls.sheet_names:
+                        if sheet != '공시정보':
+                            category = sheet.split('_')[0] if '_' in sheet else sheet
+                            categories.append(category)
+                    
+                    categories = sorted(list(set(categories)))
+                    bank_info['categories'] = categories
+                    
+                    # 공시 정보에서 상세 데이터 추출
+                    if '공시정보' in xls.sheet_names:
+                        info_df = pd.read_excel(file_path, sheet_name='공시정보')
+                        if '공시 날짜' in info_df.columns and not info_df['공시 날짜'].empty:
+                            bank_info['date_info'] = str(info_df['공시 날짜'].iloc[0])
+                        if '데이터 신선도' in info_df.columns and not info_df['데이터 신선도'].empty:
+                            bank_info['is_fresh'] = str(info_df['데이터 신선도'].iloc[0]) == '최신'
+                    
+                    # 상태 결정
+                    if set(categories) >= set(CATEGORIES):
+                        bank_info['status'] = 'success'
+                    elif categories:
+                        bank_info['status'] = 'partial'
+                        bank_info['error_reason'] = f"누락된 카테고리: {', '.join(set(CATEGORIES) - set(categories))}"
+                    else:
+                        bank_info['status'] = 'failed'
+                        bank_info['error_reason'] = '테이블 추출 실패'
+                        
+                except Exception as e:
+                    bank_info['error_reason'] = f'파일 분석 오류: {str(e)}'
+            else:
+                # 검증 데이터에서 정보 추출 시도
+                if bank in validation_dict:
+                    validation_info = validation_dict[bank]
+                    bank_info['date_info'] = validation_info.get('date_info', '날짜 정보 없음')
+                    bank_info['is_fresh'] = validation_info.get('is_fresh', False)
+                    bank_info['error_reason'] = '데이터 추출 완료되었으나 파일 저장 실패'
+                else:
+                    bank_info['error_reason'] = '은행 페이지 접근 실패'
+            
+            bank_details.append(bank_info)
+        
+        return bank_details
+        
+    except Exception as e:
+        log_message(f"은행 상세 정보 수집 실패: {str(e)}")
+        return []
     """스크래핑 결과 요약 보고서를 생성합니다."""
     try:
         progress_manager = ProgressManager()
@@ -1298,6 +1463,9 @@ def main():
 
         # 이메일 알림 발송
         if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and RECIPIENT_EMAILS:
+            # 은행별 상세 정보 수집
+            bank_details = collect_bank_details()
+            
             subject = f"저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} - {TODAY}"
             
             body = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.
@@ -1316,15 +1484,15 @@ def main():
 - 성공률: {stats.get('성공률', '0.00%')}
 
 첨부 파일:
+- 모든 은행 데이터 (ZIP 압축파일)
 - 요약 보고서 (Excel)
 - 실행 로그 파일
 """
 
-            if failed_banks:
-                body += f"\n실패한 은행 목록:\n" + "\n".join(f"- {bank}" for bank in failed_banks)
-
-            # 첨부 파일 준비
+            # 첨부 파일 준비 (ZIP 파일 우선)
             attachments = []
+            if zip_file and os.path.exists(zip_file):
+                attachments.append(zip_file)
             if summary_file and os.path.exists(summary_file):
                 attachments.append(summary_file)
             if os.path.exists(LOG_FILE):
@@ -1332,7 +1500,7 @@ def main():
 
             # 이메일 발송
             is_success = len(failed_banks) == 0
-            send_email_notification(subject, body, attachments, is_success)
+            send_email_notification(subject, body, bank_details, attachments, is_success)
 
         log_message(f"\n===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 [{TODAY}] =====")
 

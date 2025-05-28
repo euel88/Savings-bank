@@ -189,7 +189,7 @@ def validate_data_freshness():
         log_message(f"데이터 신선도 검증 오류: {str(e)}")
         return [f"{current_year-1}년9월말", f"{current_year}년3월말"]
 
-def send_email_notification(subject, body, bank_details=None, attachment_paths=None, is_success=True):
+def send_email_notification(subject, body, bank_details=None, attachment_paths=None, is_success=True, expected_dates=None):
     """Gmail SMTP를 통해 이메일 알림을 발송합니다."""
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD or not RECIPIENT_EMAILS:
         log_message("이메일 설정이 불완전하여 알림을 발송하지 않습니다.")
@@ -204,22 +204,42 @@ def send_email_notification(subject, body, bank_details=None, attachment_paths=N
         
         # 은행별 상세 정보를 본문에 추가
         enhanced_body = body
+        
+        # 날짜 검증 정보 추가
+        if expected_dates:
+            enhanced_body += f"\n\n===== 데이터 신선도 검증 기준 =====\n"
+            enhanced_body += f"📅 예상 최신 데이터 분기: {expected_dates[0]}\n"
+            enhanced_body += f"📅 조기 업로드 가능 분기: {expected_dates[1]}\n"
+            enhanced_body += f"⚠️  이 기준과 다른 날짜의 데이터는 구버전이거나 추출 오류일 가능성이 있습니다.\n"
+        
         if bank_details:
             enhanced_body += "\n\n===== 은행별 상세 결과 =====\n"
             
-            # 성공한 은행들
+            # 성공한 은행들 (날짜별로 그룹화)
             successful_banks = [bank for bank in bank_details if bank['status'] == 'success']
             if successful_banks:
-                enhanced_body += f"\n✅ 성공한 은행 ({len(successful_banks)}개):\n"
-                for bank in successful_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+                enhanced_body += f"\n✅ 완전 성공한 은행 ({len(successful_banks)}개):\n"
+                
+                # 최신 데이터 은행들
+                fresh_successful = [bank for bank in successful_banks if bank.get('is_fresh', False)]
+                if fresh_successful:
+                    enhanced_body += f"\n  🟢 최신 데이터 ({len(fresh_successful)}개):\n"
+                    for bank in fresh_successful:
+                        enhanced_body += f"    • {bank['name']}: {bank['date_info']}\n"
+                
+                # 구버전 데이터 은행들
+                old_successful = [bank for bank in successful_banks if not bank.get('is_fresh', False)]
+                if old_successful:
+                    enhanced_body += f"\n  🟡 구버전 데이터 ({len(old_successful)}개):\n"
+                    for bank in old_successful:
+                        enhanced_body += f"    • {bank['name']}: {bank['date_info']}\n"
             
             # 부분 성공한 은행들  
             partial_banks = [bank for bank in bank_details if bank['status'] == 'partial']
             if partial_banks:
                 enhanced_body += f"\n⚠️ 부분 성공한 은행 ({len(partial_banks)}개):\n"
                 for bank in partial_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank['date_info']} (일부 카테고리 누락)\n"
+                    enhanced_body += f"  • {bank['name']}: {bank['date_info']} (누락: {bank.get('error_reason', '알 수 없음')})\n"
             
             # 실패한 은행들
             failed_banks = [bank for bank in bank_details if bank['status'] == 'failed']
@@ -228,25 +248,25 @@ def send_email_notification(subject, body, bank_details=None, attachment_paths=N
                 for bank in failed_banks:
                     enhanced_body += f"  • {bank['name']}: {bank.get('error_reason', '알 수 없는 오류')}\n"
             
-            # 데이터 신선도별 분류
-            enhanced_body += "\n\n===== 데이터 신선도별 분류 =====\n"
-            fresh_banks = [bank for bank in bank_details if bank.get('is_fresh', False)]
-            old_banks = [bank for bank in bank_details if not bank.get('is_fresh', False) and bank['status'] in ['success', 'partial']]
+            # 데이터 품질 요약
+            total_banks = len(bank_details)
+            fresh_count = len([bank for bank in bank_details if bank.get('is_fresh', False)])
+            old_count = len([bank for bank in bank_details if not bank.get('is_fresh', False) and bank['status'] in ['success', 'partial']])
             
-            if fresh_banks:
-                enhanced_body += f"\n🟢 최신 데이터 은행 ({len(fresh_banks)}개):\n"
-                for bank in fresh_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+            enhanced_body += f"\n\n===== 데이터 품질 요약 =====\n"
+            enhanced_body += f"📊 전체 처리 은행: {total_banks}개\n"
+            enhanced_body += f"🟢 최신 분기 데이터: {fresh_count}개 ({fresh_count/total_banks*100:.1f}%)\n"
+            enhanced_body += f"🟡 구버전 분기 데이터: {old_count}개 ({old_count/total_banks*100:.1f}%)\n"
             
-            if old_banks:
-                enhanced_body += f"\n🟡 구버전 데이터 은행 ({len(old_banks)}개):\n"
-                for bank in old_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank['date_info']}\n"
+            if old_count > fresh_count:
+                enhanced_body += f"\n⚠️ 주의: 구버전 데이터가 최신 데이터보다 많습니다. 일부 은행의 데이터 업로드가 지연되었거나 추출 오류가 있을 수 있습니다.\n"
+            elif fresh_count > 0:
+                enhanced_body += f"\n✅ 양호: {fresh_count}개 은행에서 최신 분기 데이터를 확인했습니다.\n"
         
         # 본문 추가
         msg.attach(MIMEText(enhanced_body, 'plain', 'utf-8'))
         
-        # 첨부 파일 추가
+        # 첨부 파일 추가 (ZIP 파일 우선)
         if attachment_paths:
             for file_path in attachment_paths:
                 if os.path.exists(file_path):
@@ -257,12 +277,22 @@ def send_email_notification(subject, body, bank_details=None, attachment_paths=N
                         
                         encoders.encode_base64(part)
                         filename = os.path.basename(file_path)
-                        part.add_header(
-                            'Content-Disposition',
-                            f'attachment; filename= {filename}',
-                        )
+                        
+                        # ZIP 파일인 경우 명확하게 표시
+                        if filename.endswith('.zip'):
+                            part.add_header(
+                                'Content-Disposition',
+                                f'attachment; filename="{filename}"',
+                            )
+                            log_message(f"ZIP 압축파일 첨부: {filename}")
+                        else:
+                            part.add_header(
+                                'Content-Disposition',
+                                f'attachment; filename="{filename}"',
+                            )
+                            log_message(f"첨부 파일 추가: {filename}")
+                            
                         msg.attach(part)
-                        log_message(f"첨부 파일 추가: {filename}")
                     except Exception as e:
                         log_message(f"첨부 파일 추가 실패 ({file_path}): {str(e)}")
         
@@ -605,6 +635,31 @@ def validate_extracted_date(extracted_date, expected_dates):
     return False, f"예상 날짜와 불일치: {extracted_date} (예상: {', '.join(expected_dates)})"
 
 def select_bank(driver, bank_name):
+    """정확한 은행명 매칭을 위한 개선된 은행 선택 함수"""
+    try:
+        # 메인 페이지로 접속
+        driver.get(BASE_URL)
+        WaitUtils.wait_for_page_load(driver)
+        WaitUtils.wait_with_random(1, 2)
+
+        # 개선된 JavaScript 기반 은행 선택 (정확한 매칭 우선)
+        js_script = f"""
+        var targetBank = '{bank_name}';
+        var allElements = document.querySelectorAll('a, td, th, span, div');
+        var exactMatches = [];
+        var partialMatches = [];
+        
+        // 1단계: 모든 요소를 스캔하여 정확한 매칭과 부분 매칭을 분류
+        for(var i = 0; i < allElements.length; i++) {{
+            var element = allElements[i];
+            var text = element.textContent.trim();
+            
+            // 정확한 일치 (완전히 동일한 텍스트)
+            if(text === targetBank) {{
+                exactMatches.push({{element: element, text: text, type: 'exact'}});
+            }}
+            // 단어 경계를 고려한 정확한 매칭 (앞뒤에 공백이나 특수문자가 있는 경우)
+            else if(text.match(new RegExp('\\\\b' + targetBank.replace(/[.*+?^${{}}()|[\\]\\\\]/g, '\\\\def select_bank(driver, bank_name):
     """다양한 방법으로 은행을 선택합니다."""
     try:
         # 메인 페이지로 접속
@@ -684,6 +739,106 @@ def select_bank(driver, bank_name):
                         return True
             except Exception:
                 continue
+
+        log_message(f"{bank_name} 은행을 찾을 수 없습니다.")
+        return False
+
+    except Exception as e:
+        log_message(f"{bank_name} 은행 선택 실패: {str(e)}")
+        return False') + '\\\\b'))) {{
+                exactMatches.push({{element: element, text: text, type: 'word_boundary'}});
+            }}
+            // 부분 일치는 매우 제한적으로만 허용 (텍스트 길이가 은행명의 1.5배 이하인 경우만)
+            else if(text.includes(targetBank) && text.length <= targetBank.length * 1.5 && text.length > targetBank.length) {{
+                partialMatches.push({{element: element, text: text, type: 'partial'}});
+            }}
+        }}
+        
+        // 2단계: 정확한 매칭부터 우선적으로 처리
+        var candidatesToTry = exactMatches.concat(partialMatches);
+        
+        for(var i = 0; i < candidatesToTry.length; i++) {{
+            var candidate = candidatesToTry[i];
+            var element = candidate.element;
+            
+            try {{
+                // 요소가 화면에 보이는지 확인
+                if(element.offsetParent === null) continue;
+                
+                element.scrollIntoView({{block: 'center'}});
+                
+                // 링크인 경우 직접 클릭
+                if(element.tagName.toLowerCase() === 'a') {{
+                    element.click();
+                    return candidate.type + '_direct_link';
+                }}
+                
+                // 링크가 아닌 경우 내부에서 링크 찾기
+                var links = element.querySelectorAll('a');
+                if(links.length > 0) {{
+                    links[0].click();
+                    return candidate.type + '_nested_link';
+                }}
+                
+                // 그 외의 경우 요소 자체 클릭
+                element.click();
+                return candidate.type + '_element_click';
+            }} catch(e) {{
+                continue; // 클릭 실패 시 다음 후보로 이동
+            }}
+        }}
+        
+        return false;
+        """
+        
+        result = driver.execute_script(js_script)
+        if result:
+            log_message(f"{bank_name} 은행: JavaScript {result} 성공", verbose=False)
+            WaitUtils.wait_with_random(1, 2)
+            return True
+
+        # JavaScript 실패 시 Selenium 기반 대체 방법 (정확한 매칭 우선)
+        # 1. 정확한 텍스트 매칭 우선
+        exact_xpaths = [
+            f"//td[normalize-space(text())='{bank_name}']//a | //a[normalize-space(text())='{bank_name}']",
+            f"//td[text()='{bank_name}']//a | //a[text()='{bank_name}']"
+        ]
+        
+        for xpath in exact_xpaths:
+            try:
+                elements = driver.find_elements(By.XPATH, xpath)
+                for element in elements:
+                    if element.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                        WaitUtils.wait_with_random(0.5, 1)
+                        driver.execute_script("arguments[0].click();", element)
+                        WaitUtils.wait_with_random(1, 2)
+                        log_message(f"{bank_name} 은행: Selenium 정확한 매칭 성공", verbose=False)
+                        return True
+            except Exception:
+                continue
+
+        # 2. 제한적 부분 매칭 (정확한 매칭 실패 시에만)
+        log_message(f"{bank_name} 은행: 정확한 매칭 실패, 제한적 부분 매칭 시도", verbose=False)
+        
+        # 부분 매칭을 위한 더 정교한 XPath
+        partial_xpath = f"//td[contains(text(), '{bank_name}') and string-length(text()) <= {len(bank_name) * 2}]//a | //a[contains(text(), '{bank_name}') and string-length(text()) <= {len(bank_name) * 2}]"
+        
+        try:
+            elements = driver.find_elements(By.XPATH, partial_xpath)
+            for element in elements:
+                element_text = element.text.strip()
+                # 추가 검증: 은행명이 포함되어 있지만 너무 다르지 않은 경우만 허용
+                if bank_name in element_text and len(element_text) <= len(bank_name) * 1.5:
+                    if element.is_displayed():
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                        WaitUtils.wait_with_random(0.5, 1)
+                        driver.execute_script("arguments[0].click();", element)
+                        WaitUtils.wait_with_random(1, 2)
+                        log_message(f"{bank_name} 은행: Selenium 제한적 부분 매칭 성공 (매칭된 텍스트: {element_text})", verbose=False)
+                        return True
+        except Exception:
+            pass
 
         log_message(f"{bank_name} 은행을 찾을 수 없습니다.")
         return False
@@ -1601,23 +1756,27 @@ def main():
 - 성공률: {stats.get('성공률', '0.00%')}
 
 첨부 파일:
-- 모든 은행 데이터 (ZIP 압축파일)
-- 요약 보고서 (Excel)
-- 실행 로그 파일
+- 📦 모든 은행 데이터 (ZIP 압축파일) - 메인 첨부파일
+- 📊 요약 보고서 (Excel)
+- 📋 실행 로그 파일
 """
 
-            # 첨부 파일 준비 (ZIP 파일 우선)
+            # 첨부 파일 준비 (ZIP 파일을 최우선으로)
             attachments = []
             if zip_file and os.path.exists(zip_file):
                 attachments.append(zip_file)
+                log_message(f"ZIP 파일 첨부 준비: {zip_file}")
             if summary_file and os.path.exists(summary_file):
                 attachments.append(summary_file)
             if os.path.exists(LOG_FILE):
                 attachments.append(LOG_FILE)
 
+            # 예상 날짜 정보 가져오기 (이메일에 포함하기 위해)
+            expected_dates = validate_data_freshness()
+
             # 이메일 발송
             is_success = len(failed_banks) == 0
-            send_email_notification(subject, body, bank_details, attachments, is_success)
+            send_email_notification(subject, body, bank_details, attachments, is_success, expected_dates)
 
         log_message(f"\n===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 [{TODAY}] =====")
 

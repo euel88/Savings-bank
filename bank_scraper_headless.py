@@ -166,10 +166,10 @@ class Config:
         self.VERSION = "2.11.0-improved" 
         self.BASE_URL = "https://www.fsb.or.kr/busmagequar_0100.act"
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2')) 
-        # 성능 최적화를 위한 타임아웃 값 조정
-        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '12'))
-        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '6'))
-        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '3'))  # 안정성을 위해 조정
+        # 구글 코랩 수준의 성능 설정 유지
+        self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '8'))
+        self.WAIT_TIMEOUT = int(os.getenv('WAIT_TIMEOUT', '4'))
+        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '5'))
 
         self.today = datetime.now().strftime("%Y%m%d")
         self.output_dir_base = Path(os.getenv('OUTPUT_DIR', "./output"))
@@ -452,18 +452,17 @@ class BankScraper:
         return False
 
     def select_category(self, driver, category_name):
-        """개선된 카테고리 선택 로직"""
+        """성능 최적화된 카테고리 선택 로직"""
         logger.debug(f"카테고리 선택: '{category_name}'")
         
-        # 페이지 상태 안정화를 위한 짧은 대기
-        time.sleep(random.uniform(0.2, 0.4))
+        # 코랩 수준의 빠른 처리를 위한 최소 대기
+        time.sleep(random.uniform(0.1, 0.2))
         
         cat_norm = category_name.replace(' ', '')
         
-        # 방법 1: 정확한 텍스트 매칭
+        # 방법 1: 정확한 텍스트 매칭 (빠른 처리)
         selectors = [
             (By.XPATH, f"//a[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),
-            (By.XPATH, f"//button[normalize-space(translate(text(),' \t\n\r',''))='{cat_norm}']"),
             (By.LINK_TEXT, category_name),
             (By.PARTIAL_LINK_TEXT, category_name)
         ]
@@ -472,13 +471,11 @@ class BankScraper:
             try:
                 for el in driver.find_elements(by_type, val):
                     if el.is_displayed() and el.is_enabled() and self._robust_click(driver, el): 
-                        time.sleep(random.uniform(0.3, 0.5))
-                        # 페이지 변경 확인을 위한 짧은 대기
-                        WebDriverWait(driver, 3).until(lambda d: d.execute_script('return document.readyState') == 'complete')
+                        time.sleep(random.uniform(0.2, 0.3))
                         return True
             except: pass
         
-        # 방법 2: JavaScript 기반 선택
+        # 방법 2: JavaScript 기반 선택 (단일 시도)
         js = f"""
         var els = Array.from(document.querySelectorAll('a,li,button,span,div[role="tab"]'));
         var t = els.find(e => e.textContent && e.textContent.trim().includes('{category_name}'));
@@ -491,12 +488,11 @@ class BankScraper:
         """
         try:
             if driver.execute_script(js): 
-                time.sleep(random.uniform(0.3, 0.5))
-                WebDriverWait(driver, 3).until(lambda d: d.execute_script('return document.readyState') == 'complete')
+                time.sleep(random.uniform(0.2, 0.3))
                 return True
         except: pass
         
-        logger.warning(f"'{category_name}' 카테고리 선택 최종 실패.")
+        logger.warning(f"'{category_name}' 카테고리 선택 실패.")
         return False
         
     def extract_tables_from_page(self, driver):
@@ -571,14 +567,14 @@ class BankScraper:
             return []
 
     def _scrape_single_bank_attempt(self, bank_name, driver):
-        """카테고리별 데이터 중복 방지를 위한 개선된 스크래핑 로직"""
+        """성능 최적화된 스크래핑 로직 - 카테고리 중복 방지"""
         logger.info(f"[{bank_name}] 스크래핑 시도...")
         
         if not self.select_bank(driver, bank_name): 
             return None
         
-        # 은행 페이지 안정화 대기
-        time.sleep(0.5)
+        # 은행 페이지 최소 안정화
+        time.sleep(0.3)
         
         date_info_scraped = self.extract_date_information(driver)
         logger.info(f"[{bank_name}] 추출 공시일(원본): '{date_info_scraped}'")
@@ -587,18 +583,13 @@ class BankScraper:
         expected_officially_due = self.config.latest_due_period
         expected_next_imminent = self.config.next_imminent_period
         
-        logger.info(f"[{bank_name}] 정규화 공시일: '{normalized_scraped_date}', 공식적 최신 예상: '{expected_officially_due}', 다음 업로드 예상: '{expected_next_imminent}'")
-        
-        if normalized_scraped_date is None: 
-            logger.error(f"[{bank_name}] 날짜 추출 실패. 비교 불가.")
-        elif normalized_scraped_date == "알 수 없는 형식": 
-            logger.warning(f"[{bank_name}] 날짜 형식 알 수 없음: '{date_info_scraped}'. 비교 불가.")
-        elif normalized_scraped_date == expected_officially_due: 
-            logger.info(f"[{bank_name}] 공시일('{normalized_scraped_date}')이 공식적으로 최신이어야 할 기간과 일치.")
-        elif normalized_scraped_date == expected_next_imminent: 
-            logger.info(f"[{bank_name}] 공시일('{normalized_scraped_date}')이 다음 업로드 예정/진행 기간과 일치 (선제적 업데이트).")
-        else: 
-            logger.critical(f"[{bank_name}] !!날짜 불일치!! 웹사이트(정규화): '{normalized_scraped_date}', 공식적 최신 예상: '{expected_officially_due}', 다음 업로드 예상: '{expected_next_imminent}'. (사이트 원본: '{date_info_scraped}')")
+        # 날짜 검증 로직은 유지하되 로깅 간소화
+        if normalized_scraped_date == expected_officially_due:
+            logger.info(f"[{bank_name}] 날짜 일치: 공식적 최신")
+        elif normalized_scraped_date == expected_next_imminent:
+            logger.info(f"[{bank_name}] 날짜 일치: 선제적 업데이트")
+        elif normalized_scraped_date not in [None, "알 수 없는 형식"]:
+            logger.warning(f"[{bank_name}] 날짜 불일치: {normalized_scraped_date}")
         
         data = {
             '_INFO_': pd.DataFrame([{
@@ -610,45 +601,100 @@ class BankScraper:
         }
         
         has_data = False
-        orig_url = driver.current_url
+        base_url = driver.current_url
         
-        # 카테고리별 처리 로직 개선 - 중복 방지
+        # 카테고리별 데이터 수집 (각 카테고리당 하나의 시트)
         for cat_name in self.config.CATEGORIES:
-            cat_selected = False
+            # 카테고리 변경을 위한 페이지 새로고침 (중복 방지용)
+            if has_data:  # 첫 번째 카테고리가 아닌 경우만 새로고침
+                driver.refresh()
+                WebDriverWait(driver, self.config.PAGE_LOAD_TIMEOUT).until(
+                    lambda d: d.execute_script('return document.readyState') == 'complete'
+                )
+                time.sleep(0.2)
             
-            # 카테고리 선택 재시도 로직
-            for attempt in range(2):
-                if attempt > 0: 
-                    # 원래 URL로 돌아가서 새로 시작
-                    logger.debug(f"[{bank_name}] '{cat_name}' 카테고리 재시도 {attempt+1}/2")
-                    driver.get(orig_url)
-                    WebDriverWait(driver, self.config.PAGE_LOAD_TIMEOUT).until(lambda d: d.execute_script('return document.readyState') == 'complete')
-                    time.sleep(0.3)
+            if self.select_category(driver, cat_name):
+                tables = self.extract_tables_from_page(driver)
                 
-                if self.select_category(driver, cat_name): 
-                    cat_selected = True
-                    break
-            
-            if not cat_selected: 
-                logger.error(f"[{bank_name}] '{cat_name}' 최종 선택 실패.")
-                continue
-            
-            # 현재 카테고리의 테이블만 추출
-            tables = self.extract_tables_from_page(driver)
-            
-            if tables:
-                # 카테고리별로 독립적인 테이블 저장
-                for i, df_tbl in enumerate(tables): 
-                    sheet_key = re.sub(r'[\\/*?:\[\]]', '', f"{cat_name}_{i+1}")[:31]
-                    data[sheet_key] = df_tbl
-                has_data = True
-                logger.debug(f"[{bank_name}] '{cat_name}' 카테고리에서 {len(tables)}개 테이블 추출")
+                if tables:
+                    # 카테고리별로 모든 테이블을 하나의 시트에 통합
+                    data[cat_name] = tables  # 테이블 리스트를 저장
+                    has_data = True
+                    logger.debug(f"[{bank_name}] '{cat_name}': {len(tables)}개 테이블")
+                else:
+                    logger.debug(f"[{bank_name}] '{cat_name}': 테이블 없음")
             else:
-                logger.warning(f"[{bank_name}] '{cat_name}' 카테고리에서 테이블 없음")
+                logger.warning(f"[{bank_name}] '{cat_name}' 선택 실패")
         
-        return data if has_data else None
+    def classify_table_by_content(self, df, source_category=None):
+        """테이블 내용을 분석하여 적절한 카테고리 분류"""
+        if df.empty:
+            return None
+        
+        # 테이블의 모든 텍스트 내용을 하나의 문자열로 결합
+        table_text = ""
+        try:
+            # 컬럼명 텍스트 추가
+            table_text += " ".join(str(col) for col in df.columns) + " "
+            
+            # 데이터 내용 텍스트 추가 (처음 5행만 분석하여 성능 최적화)
+            for i in range(min(5, len(df))):
+                table_text += " ".join(str(val) for val in df.iloc[i].values if pd.notna(val)) + " "
+        except:
+            pass
+        
+        table_text = table_text.lower()
+        
+        # 카테고리별 키워드 정의
+        category_keywords = {
+            "영업개황": [
+                "영업점", "직원", "점포", "지점", "임직원", "조직", "영업망", "본점", "지역본부",
+                "영업현황", "영업실적", "영업활동", "영업개황", "영업정보", "업무현황",
+                "점포수", "직원수", "임원", "조직도", "영업소", "출장소"
+            ],
+            "재무현황": [
+                "자산", "부채", "자본", "자기자본", "총자산", "총부채", "순자산", "자본금",
+                "대차대조표", "재무상태표", "자산구성", "부채구성", "자본구성",
+                "현금", "예금", "대출", "유가증권", "고정자산", "유동자산",
+                "차입금", "예수금", "자본적정성", "레버리지", "자산건전성"
+            ],
+            "손익현황": [
+                "수익", "비용", "손익", "이익", "손실", "매출", "영업이익", "순이익",
+                "손익계산서", "영업수익", "영업비용", "금융수익", "금융비용",
+                "이자수익", "이자비용", "수수료", "영업외수익", "영업외비용",
+                "당기순이익", "세전이익", "세후이익", "수익성", "roe", "roa"
+            ],
+            "기타": [
+                "기타", "부가정보", "주요사항", "특기사항", "공시사항", "참고사항",
+                "비고", "주석", "설명", "기타현황", "추가정보", "보조정보"
+            ]
+        }
+        
+        # 각 카테고리별 점수 계산
+        category_scores = {}
+        for category, keywords in category_keywords.items():
+            score = 0
+            for keyword in keywords:
+                # 키워드가 테이블 텍스트에 포함된 횟수만큼 점수 부여
+                score += table_text.count(keyword)
+            category_scores[category] = score
+        
+        # 최고 점수를 받은 카테고리 선택
+        best_category = max(category_scores, key=category_scores.get)
+        max_score = category_scores[best_category]
+        
+        # 점수가 0이면 원래 카테고리 유지 (분류 불가능한 경우)
+        if max_score == 0:
+            return source_category
+        
+        # 최소 임계값 이상의 점수가 있는 경우에만 분류 결과 반영
+        if max_score >= 1:
+            return best_category
+        
+        return source_category
 
     def save_bank_data(self, bank_name, excel_data_dict):
+        """카테고리별 단일 시트로 데이터 저장"""
         raw_date = excel_data_dict['_INFO_']['공시날짜'].iloc[0]
         match = re.search(r'(\d{4})년(\d{1,2})월', raw_date)
         date_fn = f"{match.group(1)}-{int(match.group(2)):02d}" if match else re.sub(r'[^\w\-_.]', '', raw_date or "날짜정보없음")
@@ -656,9 +702,36 @@ class BankScraper:
         
         try:
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-                for sheet, df in excel_data_dict.items(): 
-                    sheet_name = '정보' if sheet == '_INFO_' else sheet
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                # 정보 시트 저장
+                if '_INFO_' in excel_data_dict:
+                    excel_data_dict['_INFO_'].to_excel(writer, sheet_name='정보', index=False)
+                
+                # 각 카테고리별 시트 생성 (테이블 통합)
+                for category_name in self.config.CATEGORIES:
+                    if category_name in excel_data_dict and excel_data_dict[category_name]:
+                        tables = excel_data_dict[category_name]
+                        
+                        if len(tables) == 1:
+                            # 테이블이 하나인 경우 그대로 저장
+                            tables[0].to_excel(writer, sheet_name=category_name, index=False)
+                        else:
+                            # 여러 테이블을 하나의 시트에 통합
+                            combined_df_list = []
+                            
+                            for i, table in enumerate(tables):
+                                # 테이블 제목 행 추가 (구분용)
+                                if i > 0:  # 첫 번째 테이블이 아닌 경우
+                                    separator_row = pd.DataFrame([[''] * len(table.columns)], columns=table.columns)
+                                    title_row = pd.DataFrame([[f'=== 테이블 {i+1} ==='] + [''] * (len(table.columns)-1)], columns=table.columns)
+                                    combined_df_list.extend([separator_row, title_row])
+                                
+                                combined_df_list.append(table)
+                            
+                            # 모든 테이블을 세로로 연결
+                            if combined_df_list:
+                                combined_df = pd.concat(combined_df_list, ignore_index=True)
+                                combined_df.to_excel(writer, sheet_name=category_name, index=False)
+                
             logger.info(f"[{bank_name}] 저장 완료: {excel_path.name} (경로: {excel_path})")
             return True
         except Exception as e: 

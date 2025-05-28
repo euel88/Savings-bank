@@ -13,8 +13,9 @@
 - 실행 시간 단축을 위한 대기 시간 최적화
 - 강화된 공시 날짜 확인 및 경고 기능 (분기말 + 2개월 후 마지막 평일 업로드 규칙 기반)
 - 더 견고해진 웹페이지 내 날짜 정보 추출 로직 적용
-- 동시성 제어(Semaphore) 및 날짜 형식 비교 오류 수정 (핫픽스)
+- 동시성 제어(Semaphore) 및 날짜 형식 비교 오류 수정
 - Python 3.9 호환을 위한 타입 힌트 수정
+- 이메일 발송 시 첨부파일명 참조 오류(NameError) 수정
 """
 
 import os
@@ -78,8 +79,7 @@ def setup_logging(log_file_path, log_level="INFO"):
 logger = None # Config 초기화 시 설정됨
 
 # --- 날짜 문자열 정규화 유틸리티 ---
-def normalize_datestr_for_comparison(datestr: str) -> Union[str, None]: # 타입 힌트 수정
-    """날짜 문자열을 'YYYY년M월말' 형태로 정규화하거나, 비교 불가능 시 None 반환."""
+def normalize_datestr_for_comparison(datestr: str) -> Union[str, None]:
     if not datestr or datestr in ["날짜 정보 없음", "날짜 추출 실패"]:
         return None 
     match = re.search(r'(\d{4})년\s*(\d{1,2})월말', datestr)
@@ -162,7 +162,7 @@ class EmailSender:
 # --- 설정 클래스 ---
 class Config:
     def __init__(self):
-        self.VERSION = "2.9.3-py39-typehint-fix" # 버전 업데이트
+        self.VERSION = "2.9.4-nameerror-fix" 
         self.BASE_URL = "https://www.fsb.or.kr/busmagequar_0100.act"
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '2'))
         self.PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', '25'))
@@ -344,7 +344,7 @@ class BankScraper:
             except Exception as e: logger.warning(f"Robust 클릭 실패: {e}"); return False
 
     def extract_date_information(self, driver):
-        logger.debug(f"날짜 정보 추출 시도 (v{self.config.VERSION})...") # 버전 명시
+        logger.debug(f"날짜 정보 추출 시도 (v{self.config.VERSION})...")
         try:
             js_script = """
             var allMatches = [];
@@ -360,36 +360,23 @@ class BankScraper:
                 try { elements = document.querySelectorAll(tagsToSearch[i]); } catch (e) { elements = []; }
                 for (var j = 0; j < elements.length; j++) {
                     var elementText = elements[j].innerText || "";
-                    if (elementText.length > 3000) elementText = elementText.substring(0, 3000); // 성능 위한 길이 제한
+                    if (elementText.length > 3000) elementText = elementText.substring(0, 3000);
                     datePattern.lastIndex = 0;
                     while ((match = datePattern.exec(elementText)) !== null) {
                         var cY = parseInt(match[1]), cM = parseInt(match[2]);
-                        // 중복 최소화: 정규화된 텍스트와 연/월까지 같은 경우만 중복으로 간주하지 않음 (소스가 다르면 다른 컨텍스트일 수 있음)
-                        // 좀 더 정확한 중복 제거는 year, month만 비교
-                        if (!allMatches.some(m => m.year === cY && m.month === cM)) { // 연, 월이 같은 데이터는 이미 추가된 것으로 간주 (첫 발견 우선)
+                        if (!allMatches.some(m => m.year === cY && m.month === cM)) { 
                              allMatches.push({fullText: match[0], year: cY, month: cM});
-                        } else { // 이미 같은 연/월의 데이터가 있다면, fullText가 다른 경우(예: 공백차이)에만 업데이트 시도 또는 로그
-                            var existing = allMatches.find(m => m.year === cY && m.month === cM);
-                            // 이 부분은 필요시 정교화. 현재는 첫 발견된 연/월 텍스트를 유지.
                         }
                     }
                 }
             }
             if (allMatches.length === 0) return '날짜 정보 없음';
             allMatches.sort((a,b) => (b.year !== a.year) ? (b.year - a.year) : (b.month - a.month));
-            
             var sysYear = new Date().getFullYear();
-            var latestFYear = allMatches[0].year; // 정렬 후 가장 최신 연도
-            
-            var reasonableDates = allMatches.filter(m => {
-                // 너무 오래된 날짜 필터링 강화: 최신 발견 연도보다 5년 이상 차이나면서, 동시에 시스템 연도보다 3년 이상 차이나면 제외
-                if (m.year < latestFYear - 5 && m.year < sysYear - 3) return false;
-                // 최소한 시스템 연도 기준 10년 이내 데이터만 고려
-                return m.year >= sysYear - 10; 
-            });
-            
+            var latestFYear = allMatches[0].year; 
+            var reasonableDates = allMatches.filter(m => !(m.year < latestFYear - 5 && m.year < sysYear - 3) && m.year >= sysYear - 10);
             if (reasonableDates.length > 0) return reasonableDates[0].fullText.replace(/\s+/g, '');
-            if (allMatches.length > 0) return allMatches[0].fullText.replace(/\s+/g, ''); // 합리적 날짜 없으면 모든것 중 최신
+            if (allMatches.length > 0) return allMatches[0].fullText.replace(/\s+/g, '');
             return '날짜 정보 없음';
             """
             date_info = driver.execute_script(js_script)
@@ -531,63 +518,86 @@ class BankScraper:
     async def run(self):
         logger.info(f"==== 스크래핑 시작 (v{self.config.VERSION}) ====")
         start_time = time.monotonic()
-        pending = self.progress_manager.get_pending_banks()
-        if not pending: logger.info("처리할 은행 없음."); self.generate_summary_and_send_email(); return
+        pending_banks = self.progress_manager.get_pending_banks()
+        if not pending_banks: logger.info("처리할 은행 없음."); self.generate_summary_and_send_email(); return
         
-        logger.info(f"총 {len(pending)}개 은행 처리 예정: {pending[:3]}{'...' if len(pending)>3 else ''}")
+        logger.info(f"총 {len(pending_banks)}개 은행 처리 예정: {pending_banks[:3]}{'...' if len(pending_banks)>3 else ''}")
         semaphore = asyncio.Semaphore(self.config.MAX_WORKERS) # Semaphore 한 번만 생성
         
-        with tqdm(total=len(pending), desc="은행 스크래핑", unit="은행", dynamic_ncols=True, smoothing=0.1) as pbar:
-            tasks = [self.worker_process_bank(bank_name, pbar, semaphore) for bank_name in pending]
+        with tqdm(total=len(pending_banks), desc="은행 스크래핑", unit="은행", dynamic_ncols=True, smoothing=0.1) as pbar:
+            tasks = [self.worker_process_bank(bank_name, pbar, semaphore) for bank_name in pending_banks]
             results = await asyncio.gather(*tasks, return_exceptions=True)
         
         processed_count = sum(1 for r in results if not isinstance(r, Exception))
-        logger.info(f"asyncio.gather로 {processed_count}/{len(pending)}개 작업 반환 완료.")
+        logger.info(f"asyncio.gather로 {processed_count}/{len(pending_banks)}개 작업 반환 완료.")
         logger.info(f"==== 전체 스크래핑 완료. 소요시간: {time.monotonic() - start_time:.2f}초 ====")
         self.generate_summary_and_send_email()
 
     def generate_summary_and_send_email(self):
         logger.info("요약 보고서 및 이메일 생성 시작...")
-        summary, banks_cfg = [], self.config.BANKS
-        processed = self.progress_manager.progress.get('banks', {})
+        summary_data = []
+        all_banks_in_config = self.config.BANKS
+        processed_banks_data = self.progress_manager.progress.get('banks', {})
         expected_date_normalized = self.config.expected_latest_disclosure_period
-        comp, fail = 0,0; failed_names = []
+        
+        completed_count = 0
+        failed_count = 0
+        failed_banks_names = []
 
-        for bn in banks_cfg:
-            detail = processed.get(bn); status, original_disc_date, match_status = '미처리', '', ''
-            if detail:
-                current_status = detail.get('status')
-                original_disc_date = detail.get('date_info', '') 
+        for bank_name_iter in all_banks_in_config:
+            bank_detail = processed_banks_data.get(bank_name_iter)
+            status, original_disc_date, date_match_status = '미처리', '', ''
+            if bank_detail:
+                current_status = bank_detail.get('status')
+                original_disc_date = bank_detail.get('date_info', '') 
                 normalized_disc_date = normalize_datestr_for_comparison(original_disc_date)
 
                 if current_status == 'completed':
-                    status, comp = '완료', comp + 1
-                    if normalized_disc_date is None: match_status = "⚠️ 추출실패"
-                    elif normalized_disc_date == "알 수 없는 형식": match_status = f"❓ 형식모름 ({original_disc_date})"
-                    elif normalized_disc_date == expected_date_normalized: match_status = "✅ 일치"
-                    else: match_status = f"❌ 불일치! (예상: {expected_date_normalized})"
+                    status, completed_count = '완료', completed_count + 1
+                    if normalized_disc_date is None: date_match_status = "⚠️ 추출실패"
+                    elif normalized_disc_date == "알 수 없는 형식": date_match_status = f"❓ 형식모름 ({original_disc_date})"
+                    elif normalized_disc_date == expected_date_normalized: date_match_status = "✅ 일치"
+                    else: date_match_status = f"❌ 불일치! (예상: {expected_date_normalized})"
                 elif current_status == 'failed':
-                    status, fail = '실패', fail + 1
-                    failed_names.append(bn); match_status = "Н/Д (실패)"
-            summary.append({'은행명':bn, '공시 날짜(원본)':original_disc_date, '날짜 확인':match_status, '처리 상태':status, '확인 시간':datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                    status, failed_count = '실패', failed_count + 1
+                    failed_banks_names.append(bank_name_iter); date_match_status = "Н/Д (실패)"
+            summary_data.append({
+                '은행명':bank_name_iter, 
+                '공시 날짜(원본)':original_disc_date, 
+                '날짜 확인':date_match_status, 
+                '처리 상태':status, 
+                '확인 시간':datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
         
-        summary_df = pd.DataFrame(summary)
-        summary_fp = self.config.output_dir / f"스크래핑_요약_{self.config.today}.xlsx"
-        try: summary_df.to_excel(summary_fp, index=False); logger.info(f"요약 보고서: {summary_fp}")
-        except Exception as e: logger.error(f"요약 보고서 저장 실패: {e}", exc_info=True)
-
-        zip_fn = f"저축은행_데이터_{self.config.today}.zip"
-        zip_fp = self.config.output_dir_base / zip_fn 
+        summary_df = pd.DataFrame(summary_data)
+        
+        summary_filename = f"스크래핑_요약_{self.config.today}.xlsx" # 변수 선언
+        summary_file_path = self.config.output_dir / summary_filename
+        
         try:
-            with zipfile.ZipFile(zip_fp, 'w', zipfile.ZIP_DEFLATED) as zf:
+            summary_df.to_excel(summary_file_path, index=False)
+            logger.info(f"요약 보고서: {summary_file_path}")
+        except Exception as e:
+            logger.error(f"요약 보고서 저장 실패: {e}", exc_info=True)
+
+        zip_filename_str = f"저축은행_데이터_{self.config.today}.zip"
+        zip_file_path_obj = self.config.output_dir_base / zip_filename_str
+        try:
+            with zipfile.ZipFile(zip_file_path_obj, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for f_path in self.config.output_dir.rglob('*'):
                     if f_path.is_file(): zf.write(f_path, Path(self.config.output_dir.name) / f_path.relative_to(self.config.output_dir))
-            logger.info(f"결과 압축 완료: {zip_fp}")
-        except Exception as e: logger.error(f"결과 압축 실패: {e}", exc_info=True); zip_fp = None
+            logger.info(f"결과 압축 완료: {zip_file_path_obj}")
+        except Exception as e:
+            logger.error(f"결과 압축 실패: {e}", exc_info=True)
+            zip_file_path_obj = None
 
-        proc_attempt = comp + fail; success_rate = (comp / proc_attempt * 100) if proc_attempt > 0 else 0
-        email_subject = f"[저축은행 데이터] {self.config.today} ({comp}/{len(banks_cfg)} 완료, 날짜확인 필요)"
-        failed_disp = "".join(f"<li>{b}</li>" for b in failed_names[:10]) + (f"<p>...외 {len(failed_names)-10}개.</p>" if len(failed_names)>10 else ("없음" if not failed_names else ""))
+        processed_attempt_count = completed_count + failed_count
+        success_rate = (completed_count / processed_attempt_count * 100) if processed_attempt_count > 0 else 0
+        email_subject = f"[저축은행 데이터] {self.config.today} ({completed_count}/{len(all_banks_in_config)} 완료, 날짜확인 필요)"
+        
+        failed_banks_display_html = "".join(f"<li>{b}</li>" for b in failed_banks_names[:10]) + \
+                                (f"<p>...외 {len(failed_banks_names)-10}개.</p>" if len(failed_banks_names)>10 else \
+                                 ("없음" if not failed_banks_names else ""))
         
         body_html = f"""
         <html><head><style>
@@ -600,20 +610,28 @@ class BankScraper:
         <h2>저축은행 스크래핑 결과 ({self.config.today})</h2>
         <p><strong>예상 최신 공시 기준일:</strong> {expected_date_normalized} (근거: {self.config.expected_period_reason})</p>
         <div class="summary-box">
-            <p>총 대상: {len(banks_cfg)}개</p> <p>처리 시도: {proc_attempt}개</p>
-            <p><span class="status-completed">✅ 성공: {comp}개</span></p> <p><span class="status-failed">❌ 실패: {fail}개</span> (성공률: {success_rate:.1f}%)</p>
-            <p>📂 데이터: {self.config.output_dir.name} (압축: {zip_fn if zip_fp else '생성실패'})</p>
+            <p>총 대상: {len(all_banks_in_config)}개</p> <p>처리 시도: {processed_attempt_count}개</p>
+            <p><span class="status-completed">✅ 성공: {completed_count}개</span></p> <p><span class="status-failed">❌ 실패: {failed_count}개</span> (성공률: {success_rate:.1f}%)</p>
+            <p>📂 데이터: {self.config.output_dir.name} (압축: {zip_filename_str if zip_file_path_obj else '생성실패'})</p>
         </div>
-        <h3>실패 은행 (최대 10개):</h3><ul>{failed_disp}</ul>
+        <h3>실패 은행 (최대 10개):</h3><ul>{failed_banks_display_html}</ul>
         <p>세부 결과는 첨부파일 확인.</p> <h3>은행별 처리 현황:</h3>
         {summary_df.to_html(index=False,border=1,na_rep='').replace('<td>','<td style="word-break:normal;">') if not summary_df.empty else "<p>요약 데이터 없음.</p>"}
         <br><p><small>자동 발송 (v{self.config.VERSION})</small></p>
         </body></html>"""
         
-        attach_path = str(zip_fp) if zip_fp and zip_fp.exists() else (str(summary_fp) if summary_fp.exists() else None)
-        if attach_path and Path(attach_path).name == summary_filename and zip_fp is None : logger.warning("압축 파일 생성 실패 또는 누락. 요약 보고서만 첨부합니다.")
-        elif not attach_path: logger.warning("압축 파일 및 요약 보고서 모두 누락. 첨부 파일 없이 발송.")
-        self.email_sender.send_email_with_attachment(email_subject, body_html, attach_path)
+        attachment_to_send = None
+        if zip_file_path_obj and zip_file_path_obj.exists():
+            attachment_to_send = str(zip_file_path_obj)
+        elif summary_file_path and summary_file_path.exists():
+            attachment_to_send = str(summary_file_path)
+        
+        if attachment_to_send and Path(attachment_to_send).name == summary_filename and zip_file_path_obj is None : 
+            logger.warning("압축 파일 생성 실패 또는 누락. 요약 보고서만 첨부합니다.")
+        elif not attachment_to_send: 
+             logger.warning("압축 파일 및 요약 보고서 모두 누락. 첨부 파일 없이 발송.")
+        
+        self.email_sender.send_email_with_attachment(email_subject, body_html, attachment_to_send)
 
 # --- 메인 실행 로직 ---
 def main():

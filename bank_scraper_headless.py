@@ -627,71 +627,76 @@ class BankScraper:
                 logger.warning(f"[{bank_name}] '{cat_name}' 선택 실패")
         
     def classify_table_by_content(self, df, source_category=None):
-        """테이블 내용을 분석하여 적절한 카테고리 분류"""
-        if df.empty:
-            return None
-        
-        # 테이블의 모든 텍스트 내용을 하나의 문자열로 결합
-        table_text = ""
+        """테이블 내용을 분석하여 적절한 카테고리 분류 (안정화된 버전)"""
         try:
-            # 컬럼명 텍스트 추가
-            table_text += " ".join(str(col) for col in df.columns) + " "
+            if df is None or df.empty:
+                return source_category
             
-            # 데이터 내용 텍스트 추가 (처음 5행만 분석하여 성능 최적화)
-            for i in range(min(5, len(df))):
-                table_text += " ".join(str(val) for val in df.iloc[i].values if pd.notna(val)) + " "
-        except:
-            pass
-        
-        table_text = table_text.lower()
-        
-        # 카테고리별 키워드 정의
-        category_keywords = {
-            "영업개황": [
-                "영업점", "직원", "점포", "지점", "임직원", "조직", "영업망", "본점", "지역본부",
-                "영업현황", "영업실적", "영업활동", "영업개황", "영업정보", "업무현황",
-                "점포수", "직원수", "임원", "조직도", "영업소", "출장소"
-            ],
-            "재무현황": [
-                "자산", "부채", "자본", "자기자본", "총자산", "총부채", "순자산", "자본금",
-                "대차대조표", "재무상태표", "자산구성", "부채구성", "자본구성",
-                "현금", "예금", "대출", "유가증권", "고정자산", "유동자산",
-                "차입금", "예수금", "자본적정성", "레버리지", "자산건전성"
-            ],
-            "손익현황": [
-                "수익", "비용", "손익", "이익", "손실", "매출", "영업이익", "순이익",
-                "손익계산서", "영업수익", "영업비용", "금융수익", "금융비용",
-                "이자수익", "이자비용", "수수료", "영업외수익", "영업외비용",
-                "당기순이익", "세전이익", "세후이익", "수익성", "roe", "roa"
-            ],
-            "기타": [
-                "기타", "부가정보", "주요사항", "특기사항", "공시사항", "참고사항",
-                "비고", "주석", "설명", "기타현황", "추가정보", "보조정보"
-            ]
-        }
-        
-        # 각 카테고리별 점수 계산
-        category_scores = {}
-        for category, keywords in category_keywords.items():
-            score = 0
-            for keyword in keywords:
-                # 키워드가 테이블 텍스트에 포함된 횟수만큼 점수 부여
-                score += table_text.count(keyword)
-            category_scores[category] = score
-        
-        # 최고 점수를 받은 카테고리 선택
-        best_category = max(category_scores, key=category_scores.get)
-        max_score = category_scores[best_category]
-        
-        # 점수가 0이면 원래 카테고리 유지 (분류 불가능한 경우)
-        if max_score == 0:
+            # 테이블의 텍스트 내용을 안전하게 추출
+            table_text = ""
+            
+            # 컬럼명 텍스트 추가
+            try:
+                if hasattr(df, 'columns') and df.columns is not None:
+                    col_text = " ".join(str(col) for col in df.columns if col is not None)
+                    table_text += col_text + " "
+            except Exception as e:
+                logger.debug(f"컬럼명 텍스트 추출 실패: {e}")
+            
+            # 데이터 내용 텍스트 추가 (처음 3행만 분석하여 성능 최적화)
+            try:
+                max_rows = min(3, len(df))
+                for i in range(max_rows):
+                    row_values = []
+                    for val in df.iloc[i].values:
+                        try:
+                            if pd.notna(val) and val is not None:
+                                row_values.append(str(val))
+                        except:
+                            continue
+                    if row_values:
+                        table_text += " ".join(row_values) + " "
+            except Exception as e:
+                logger.debug(f"데이터 내용 텍스트 추출 실패: {e}")
+            
+            if not table_text.strip():
+                return source_category
+            
+            table_text = table_text.lower()
+            
+            # 카테고리별 키워드 정의 (간소화)
+            category_keywords = {
+                "영업개황": ["영업점", "직원", "점포", "지점", "임직원", "조직", "영업망", "본점", "점포수", "직원수"],
+                "재무현황": ["자산", "부채", "자본", "자기자본", "총자산", "총부채", "대차대조표", "재무상태표", "현금", "예금", "대출"],
+                "손익현황": ["수익", "비용", "손익", "이익", "손실", "매출", "영업이익", "순이익", "손익계산서", "이자수익", "이자비용"],
+                "기타": ["기타", "부가정보", "주요사항", "특기사항", "공시사항", "참고사항", "비고", "주석"]
+            }
+            
+            # 각 카테고리별 점수 계산
+            category_scores = {}
+            for category, keywords in category_keywords.items():
+                score = 0
+                for keyword in keywords:
+                    try:
+                        score += table_text.count(keyword)
+                    except:
+                        continue
+                category_scores[category] = score
+            
+            # 최고 점수를 받은 카테고리 선택
+            if category_scores:
+                best_category = max(category_scores, key=category_scores.get)
+                max_score = category_scores[best_category]
+                
+                # 점수가 1 이상이면 분류 결과 반영, 그렇지 않으면 원래 카테고리 유지
+                if max_score >= 1:
+                    return best_category
+            
             return source_category
-        
-        # 최소 임계값 이상의 점수가 있는 경우에만 분류 결과 반영
-        if max_score >= 1:
-            return best_category
-        
-        return source_category
+            
+        except Exception as e:
+            logger.warning(f"테이블 분류 중 오류 발생: {e}, 원래 카테고리 유지")
+            return source_category
 
     def save_bank_data(self, bank_name, excel_data_dict):
         """카테고리별 단일 시트로 데이터 저장"""

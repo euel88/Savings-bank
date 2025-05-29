@@ -1537,11 +1537,12 @@ def send_email_notification(subject, body_text_part, email_table_data=None, atta
               h2 {{ color: #333366; margin-left: 15px;}}
               p {{ margin-left: 15px; line-height: 1.6;}}
               .summary-section p {{ margin-left: 0; }} /* 요약 섹션의 p 태그 마진 초기화 */
+              .summary-section {{ white-space: pre-wrap; }} /* Plain text의 줄바꿈을 HTML에 반영 */
             </style>
           </head>
           <body>
             <div class="summary-section">
-              {body_text_part.replace("\\n", "<br>")}
+              <p>{body_text_part.replace("\n", "<br>")}</p> {/* 문자열 내의 \n을 <br>로 변경 */}
             </div>
         """
 
@@ -1607,7 +1608,7 @@ def send_email_notification(subject, body_text_part, email_table_data=None, atta
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             server.send_message(msg)
         
-        log_message(f"📧 이메일 알림 발송 완료: {', '.join(RECIPIENT_EMAILS)}")
+        log_message(f"� 이메일 알림 발송 완료: {', '.join(RECIPIENT_EMAILS)}")
         return True
             
     except Exception as e:
@@ -1635,7 +1636,7 @@ def main():
     try:
         log_message(f"🔧 이번 버전의 수정사항 (v2.3):")
         log_message(f"  ✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리")
-        log_message(f"  ✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가")
+        log_message(f"  ✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가 (HTML 형식)")
         log_message(f"  ✅ ZIP 파일 생성 안정화 및 README 내용 업데이트")
         
         log_message(f"\n⚙️ 현재 설정값:")
@@ -1652,7 +1653,7 @@ def main():
 
         log_message(f"📋 스크린샷 형태 결과 테이블 생성 중...")
         # all_run_results_for_report는 worker_process_bank의 반환값 리스트 [(bank, success, date_info, is_fresh), ...]
-        screenshot_file, email_table_data = generate_screenshot_format_report(all_run_results_for_report)
+        screenshot_file, email_table_data_for_html = generate_screenshot_format_report(all_run_results_for_report)
 
 
         log_message(f"📦 ZIP 압축 파일 생성 중...")
@@ -1674,8 +1675,8 @@ def main():
             log_message(f"🔍 실패한 은행 목록 (ProgressManager 기준): {', '.join(failed_banks)}")
 
         # generate_screenshot_format_report에서 생성된 문제 은행 정보 활용 가능
-        if email_table_data: # email_table_data가 생성되었다면
-            problem_banks_from_report = [b for b in email_table_data if b['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"]]
+        if email_table_data_for_html: # email_table_data_for_html가 생성되었다면
+            problem_banks_from_report = [b for b in email_table_data_for_html if b['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"]]
             if problem_banks_from_report:
                 log_message(f"⚠️ 날짜 확인 필요 은행 (보고서 기준): {len(problem_banks_from_report)}개")
                 for bank_report_item in problem_banks_from_report[:5]:
@@ -1707,11 +1708,12 @@ def main():
             
             subject_email = f"📊 저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} (v2.3) - {int(minutes)}분{int(seconds)}초"
             
+            # 이메일 본문의 Plain Text 부분
             body_text_email = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.
 
-� v2.3 수정 버전의 특징:
+🔧 v2.3 수정 버전의 특징:
 ✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리
-✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가
+✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가 (HTML 형식)
 ✅ ZIP 파일 생성 안정화 및 README 내용 업데이트
 
 📊 실행 정보:
@@ -1724,7 +1726,7 @@ def main():
 - ✅ 완료 은행 수: {stats.get('완료 은행 수', len(successful_banks))}개
 - ⚠️ 부분 완료 은행 수: {stats.get('부분 완료 은행 수', 0)}개
 - ❌ 실패 은행 수: {stats.get('실패 은행 수', len(failed_banks))}개
-- 🟢 최신 데이터 은행 수 (공시정보 기준): {stats.get('최신 데이터 은행 수', 0)}개
+- 🟢 최신 데이터 은행 수 (공시정보 기준): {stats.get('최신 데이터 은행 수 (공시정보 기준)', 0)}개
 - 📊 전체 성공률 (완료+부분완료): {stats.get('성공률', '0.00%')}
 
 📦 첨부 파일:
@@ -1745,7 +1747,7 @@ def main():
             email_sent_successfully = send_email_notification(
                 subject_email, 
                 body_text_email, 
-                email_table_data, # generate_screenshot_format_report에서 반환된 데이터
+                email_table_data_for_html, # generate_screenshot_format_report에서 반환된 테이블 데이터
                 attachments_email, 
                 not failed_banks, # 전체 성공 여부
                 expected_dates_for_email_content

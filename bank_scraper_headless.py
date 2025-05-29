@@ -5,9 +5,9 @@
 목적: 79개 저축은행의 재무정보를 빠르고 효율적으로 스크래핑
 작성일: 2025-05-29
 수정 전략: 기존 7-8분 성능 유지하면서 3가지 핵심 문제만 해결
-- 날짜 추출 오류 해결 (안국, 오투 은행만 특별 처리)
+- 날짜 추출 오류 해결 (사용자 지정 날짜 '2024년9월말', '2025년3월말'만 유효 처리)
 - ZIP 파일 생성 안정화 (.bin 오류 해결)
-- 스크린샷 형태 결과 테이블 생성 (별도 함수)
+- 스크린샷 형태 결과 테이블 생성 및 이메일 본문에 유사 테이블 추가
 """
 
 import os
@@ -78,7 +78,7 @@ LOG_FILE = os.path.join(OUTPUT_DIR, f'scraping_log_{TODAY}.log')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # =============================================================================
-# 유틸리티 함수들 (기존과 거의 동일)
+# 유틸리티 함수들
 # =============================================================================
 
 def log_message(message, print_to_console=True, verbose=True):
@@ -99,64 +99,12 @@ def log_message(message, print_to_console=True, verbose=True):
         print(message)
 
 def validate_data_freshness():
-    """현재 날짜를 기준으로 예상되는 최신 데이터 분기를 계산합니다."""
-    try:
-        current_date = datetime.now()
-        current_year = current_date.year
-        current_month = current_date.month
-        current_day = current_date.day
-        
-        def get_last_weekday_of_month(year, month):
-            import calendar
-            last_day = calendar.monthrange(year, month)[1]
-            for day in range(last_day, 0, -1):
-                if datetime(year, month, day).weekday() < 5:
-                    return day
-            return last_day
-        
-        last_weekday_current_month = get_last_weekday_of_month(current_year, current_month)
-        is_past_last_weekday = current_day > last_weekday_current_month
-        
-        if current_month == 11 or (current_month == 12) or (current_month == 1) or (current_month == 2 and not is_past_last_weekday):
-            expected_quarter_end = f"{current_year if current_month >= 11 else current_year-1}년9월말"
-            next_expected_quarter_end = f"{current_year if current_month <= 2 else current_year-1}년12월말"
-        elif current_month == 2 and is_past_last_weekday:
-            expected_quarter_end = f"{current_year-1}년12월말"
-            next_expected_quarter_end = f"{current_year}년3월말"
-        elif current_month in [3, 4] or (current_month == 5 and not is_past_last_weekday):
-            expected_quarter_end = f"{current_year-1}년12월말"
-            next_expected_quarter_end = f"{current_year}년3월말"
-        elif current_month == 5 and is_past_last_weekday:
-            expected_quarter_end = f"{current_year}년3월말"
-            next_expected_quarter_end = f"{current_year}년6월말"
-        elif current_month in [6, 7] or (current_month == 8 and not is_past_last_weekday):
-            expected_quarter_end = f"{current_year}년3월말"
-            next_expected_quarter_end = f"{current_year}년6월말"
-        elif current_month == 8 and is_past_last_weekday:
-            expected_quarter_end = f"{current_year}년6월말"
-            next_expected_quarter_end = f"{current_year}년9월말"
-        elif current_month in [9, 10] or (current_month == 11 and not is_past_last_weekday):
-            expected_quarter_end = f"{current_year}년6월말"
-            next_expected_quarter_end = f"{current_year}년9월말"
-        else:
-            expected_quarter_end = f"{current_year-1}년12월말"
-            next_expected_quarter_end = f"{current_year}년3월말"
-        
-        if current_month == 5 and not is_past_last_weekday:
-            expected_quarter_end = f"{current_year-1}년9월말"
-            next_expected_quarter_end = f"{current_year}년3월말"
-        
-        possible_dates = [expected_quarter_end, next_expected_quarter_end]
-        
-        log_message(f"현재 날짜: {current_date.strftime('%Y년 %m월 %d일')}")
-        log_message(f"예상 최신 데이터 분기: {expected_quarter_end}")
-        log_message(f"조기 업로드 가능 분기: {next_expected_quarter_end}")
-        
-        return possible_dates
-        
-    except Exception as e:
-        log_message(f"데이터 신선도 검증 오류: {str(e)}")
-        return [f"{current_year-1}년9월말", f"{current_year}년3월말"]
+    """사용자가 지정한 목표 데이터 분기를 반환합니다."""
+    # 사용자 요청: '2024년 9월말' (또는 09월말)과 '2025년 3월말' (또는 03월말)
+    # 정규화된 형태로 저장하여 이후 비교 시 일관성 유지
+    possible_dates = ["2024년9월말", "2025년3월말"]
+    log_message(f"사용자 지정 목표 데이터 분기: {', '.join(possible_dates)}")
+    return possible_dates
 
 # =============================================================================
 # 드라이버 관리 클래스 (기존과 동일)
@@ -218,9 +166,9 @@ class DriverManager:
             # Chrome 환경설정
             prefs = {
                 'profile.default_content_setting_values': {
-                    'images': 1,          # 이미지 로딩 허용
-                    'plugins': 2,         # 플러그인 차단
-                    'javascript': 1,      # JavaScript 허용 (필수)
+                    'images': 1,      # 이미지 로딩 허용
+                    'plugins': 2,       # 플러그인 차단
+                    'javascript': 1,    # JavaScript 허용 (필수)
                     'notifications': 2,   # 알림 차단
                     'media_stream': 2,    # 미디어 스트림 차단
                 },
@@ -406,117 +354,121 @@ class WaitUtils:
         time.sleep(random.uniform(min_time, max_time))
 
 # =============================================================================
-# 핵심 수정 1: 스마트 날짜 추출 (문제 은행만 특별 처리)
+# 핵심 수정 1: 스마트 날짜 추출 (사용자 지정 날짜 우선)
 # =============================================================================
 
 def extract_date_information(driver, bank_name=None):
-    """웹페이지에서 공시 날짜 정보를 추출합니다. (문제 은행만 특별 처리)"""
-    try:
-        # 기본 빠른 추출 (기존 방식 - 대부분 은행용)
-        page_source = driver.page_source
-        date_patterns = re.findall(r'\d{4}년\s*\d{1,2}월말', page_source)
-        
-        if date_patterns:
-            # 중복 제거 및 정리
-            unique_dates = list(set([re.sub(r'\s+', '', date) for date in date_patterns]))
-            
-            # 예상 날짜 우선 선택 (2024년9월말, 2025년3월말)
-            for date in unique_dates:
-                if '2024년9월말' in date or '2025년3월말' in date:
-                    log_message(f"{bank_name or '은행'} 기본 추출 성공: {date}", verbose=False)
-                    return date
-            
-            # 예상 날짜가 없으면 첫 번째 발견된 날짜
-            result = unique_dates[0]
-            log_message(f"{bank_name or '은행'} 기본 추출: {result}", verbose=False)
-            return result
+    """웹페이지에서 공시 날짜 정보를 추출합니다. 사용자가 지정한 날짜 ('2024년9월말', '2025년3월말') 우선."""
+    # 사용자가 원하는 목표 날짜 (정규화된 형태)
+    target_dates_normalized = {"2024년9월말", "2025년3월말"}
 
-        # 문제 은행인 경우에만 정밀 검색 수행
-        if bank_name in PROBLEM_BANKS:
-            log_message(f"{bank_name} 문제 은행으로 인식, 정밀 검색 수행", verbose=False)
-            
-            # 우선순위 높은 요소에서 검색
+    def normalize_date_string(date_str):
+        # 공백 제거, "09월" -> "9월" 등으로 정규화
+        s = re.sub(r'\s+', '', date_str)
+        s = s.replace('년0', '년') # 예: 2024년09월말 -> 2024년9월말
+        return s
+
+    try:
+        page_source = driver.page_source
+        found_target_date = None
+
+        # 1. 기본 빠른 추출 (정규 표현식) - 페이지 소스 전체에서 검색
+        date_candidates_text = re.findall(r'\d{4}년\s*\d{1,2}월말', page_source)
+        
+        if date_candidates_text:
+            for date_text in date_candidates_text:
+                normalized_candidate = normalize_date_string(date_text)
+                if normalized_candidate in target_dates_normalized:
+                    log_message(f"{bank_name or '은행'} 기본 추출 (타겟 일치): {normalized_candidate}", verbose=False)
+                    found_target_date = normalized_candidate
+                    break 
+            if found_target_date:
+                return found_target_date # 정규화된 타겟 날짜 반환
+
+        # 2. 문제 은행이거나 위에서 못 찾은 경우, 더 정밀한 검색 시도
+        #    (JavaScript를 사용하여 페이지의 모든 텍스트 노드에서 검색)
+        log_message(f"{bank_name or '은행'} 정밀 날짜 검색 시도 (타겟: {target_dates_normalized})", verbose=False)
+        
+        # JavaScript를 사용한 전체 텍스트 검색
+        try:
+            js_script_all_text = """
+            var allText = document.body.innerText;
+            var matches = allText.match(/\\d{4}년\\s*\\d{1,2}월말/g);
+            var targetDates = ["2024년9월말", "2025년3월말"]; 
+            var found = "";
+            if (matches) {
+                for (var i = 0; i < matches.length; i++) {
+                    var rawMatch = matches[i];
+                    var normalized = rawMatch.replace(/\\s+/g, '').replace('년0','년');
+                    if (targetDates.includes(normalized)) {
+                        found = normalized; // 타겟 날짜를 찾으면 저장
+                        break; 
+                    }
+                }
+            }
+            return found; // 찾은 타겟 날짜 또는 빈 문자열 반환
+            """
+            js_result = driver.execute_script(js_script_all_text)
+            if js_result: 
+                log_message(f"{bank_name or '은행'} JavaScript 검색 (타겟 일치): {js_result}", verbose=False)
+                return js_result # 이미 정규화된 타겟 날짜
+        except Exception as e_js:
+            log_message(f"{bank_name or '은행'} JavaScript 검색 실패: {str(e_js)}", verbose=False)
+
+        # 3. (선택적) 기존의 선택자 기반 정밀 검색 (위 방법들이 실패했을 경우 대비)
+        #    이 부분은 중복될 수 있으나, 특정 구조에 의존하는 경우를 위해 남겨둘 수 있음
+        if bank_name in PROBLEM_BANKS: # 문제 은행에 대해서만 추가 시도
             priority_selectors = [
-                "//h1[contains(text(), '년') and contains(text(), '월말')]",
-                "//h2[contains(text(), '년') and contains(text(), '월말')]", 
-                "//h3[contains(text(), '년') and contains(text(), '월말')]",
-                "//th[contains(text(), '기말') and contains(text(), '년')]",
-                "//td[contains(text(), '기말') and contains(text(), '년')]"
+                "//h1", "//h2", "//h3", "//h4", "//h5", "//h6",
+                "//p", "//span", "//div",
+                "//th", "//td"
             ]
-            
             for selector in priority_selectors:
                 try:
                     elements = driver.find_elements(By.XPATH, selector)
                     for element in elements:
-                        text = element.text.strip()
-                        date_matches = re.findall(r'\d{4}년\s*\d{1,2}월말', text)
-                        for match in date_matches:
-                            clean_date = re.sub(r'\s+', '', match)
-                            # 예상 날짜와 매칭 확인
-                            if '2024년9월말' in clean_date or '2025년3월말' in clean_date:
-                                log_message(f"{bank_name} 정밀 검색 성공: {clean_date}", verbose=False)
-                                return clean_date
+                        try:
+                            text = element.text.strip()
+                            if not text: continue
+                            element_date_matches = re.findall(r'\d{4}년\s*\d{1,2}월말', text)
+                            for match_text in element_date_matches:
+                                normalized_match = normalize_date_string(match_text)
+                                if normalized_match in target_dates_normalized:
+                                    log_message(f"{bank_name} 선택자 기반 검색 (타겟 일치 - {selector}): {normalized_match}", verbose=False)
+                                    return normalized_match
+                        except StaleElementReferenceException:
+                            continue
                 except Exception:
                     continue
-            
-            # JavaScript를 사용한 최종 시도 (문제 은행만)
-            try:
-                js_script = """
-                var allText = document.body.innerText;
-                var matches = allText.match(/\\d{4}년\\s*\\d{1,2}월말/g);
-                if (matches) {
-                    for (var i = 0; i < matches.length; i++) {
-                        var clean = matches[i].replace(/\\s+/g, '');
-                        if (clean.includes('2024년9월말') || clean.includes('2025년3월말')) {
-                            return clean;
-                        }
-                    }
-                    return matches[0].replace(/\\s+/g, '');
-                }
-                return '';
-                """
-                js_result = driver.execute_script(js_script)
-                if js_result:
-                    log_message(f"{bank_name} JavaScript 검색 성공: {js_result}", verbose=False)
-                    return js_result
-            except Exception as e:
-                log_message(f"{bank_name} JavaScript 검색 실패: {str(e)}", verbose=False)
-
+        
+        log_message(f"{bank_name or '은행'}에서 지정된 날짜 정보를 찾을 수 없음 (타겟: {target_dates_normalized})", verbose=True)
         return "날짜 정보 없음"
 
     except Exception as e:
-        log_message(f"날짜 정보 추출 오류: {str(e)}", verbose=False)
+        log_message(f"날짜 정보 추출 중 전체 오류 ({bank_name or '은행'}): {str(e)}", verbose=True)
         return "날짜 추출 실패"
 
+
 def validate_extracted_date(extracted_date, expected_dates):
-    """추출된 날짜가 예상 날짜와 일치하는지 검증합니다. (기존 방식 유지)"""
+    """추출된 날짜가 예상 날짜와 일치하는지 검증합니다."""
     if not extracted_date or extracted_date in ["날짜 정보 없음", "날짜 추출 실패"]:
         return False, "날짜 정보를 추출할 수 없음"
     
-    # 추출된 날짜 정규화
-    normalized_extracted = re.sub(r'\s+', '', extracted_date)
+    # 추출된 날짜는 extract_date_information에서 이미 정규화된 타겟 날짜 중 하나이거나 "날짜 정보 없음" 등임
+    # expected_dates도 ["2024년9월말", "2025년3월말"] 형태
     
-    # 정확한 매칭 확인
-    for expected_date in expected_dates:
-        normalized_expected = re.sub(r'\s+', '', expected_date)
-        if normalized_extracted == normalized_expected:
-            return True, f"최신 데이터 확인: {extracted_date}"
+    if extracted_date in expected_dates:
+        return True, f"최신 데이터 확인: {extracted_date}"
     
-    # 부분 일치 확인 (년도와 월 확인)
-    try:
-        match = re.search(r'(\d{4})년(\d{1,2})월말', normalized_extracted)
-        if match:
-            year, month = match.groups()
-            for expected_date in expected_dates:
-                exp_match = re.search(r'(\d{4})년(\d{1,2})월말', expected_date)
-                if exp_match:
-                    exp_year, exp_month = exp_match.groups()
-                    if year == exp_year and month.zfill(2) == exp_month.zfill(2):
-                        return True, f"예상보다 빠른 업로드: {extracted_date}"
-    except Exception:
-        pass
-    
+    # 혹시 모를 다른 형태의 유효한 날짜 문자열 (예: "2024년 09월말")이 extract_date_information에서
+    # 정규화되지 않고 반환되었을 경우를 대비한 추가 검증 (하지만 위 함수에서 정규화된 값만 반환하도록 수정됨)
+    normalized_extracted = re.sub(r'\s+', '', extracted_date).replace('년0', '년')
+    for expected in expected_dates:
+        if normalized_extracted == expected:
+            return True, f"최신 데이터 확인 (추가 검증): {extracted_date}"
+            
     return False, f"예상 날짜와 불일치: {extracted_date} (예상: {', '.join(expected_dates)})"
+
 
 # 나머지 함수들은 기존과 동일하게 유지
 def select_bank(driver, bank_name):
@@ -857,7 +809,7 @@ def extract_tables_from_page(driver):
         return []
 
 # =============================================================================
-# 메인 스크래핑 로직 (기존과 거의 동일)
+# 메인 스크래핑 로직 (기존과 거의 동일, 날짜 추출 함수 호출 시 bank_name 전달)
 # =============================================================================
 
 def scrape_bank_data(bank_name, driver, progress_manager, expected_dates):
@@ -878,14 +830,15 @@ def scrape_bank_data(bank_name, driver, progress_manager, expected_dates):
             log_message(f"{bank_name} 은행 페이지 URL 획득 실패")
             return None
 
-        # 날짜 정보 추출 및 검증 (수정된 부분: bank_name 전달)
+        # 날짜 정보 추출 및 검증 (수정된 extract_date_information 사용)
         date_info = extract_date_information(driver, bank_name)
         is_fresh, validation_message = validate_extracted_date(date_info, expected_dates)
         
         # 데이터 검증 결과 기록
         progress_manager.mark_data_validated(bank_name, date_info, is_fresh)
         
-        log_message(f"{bank_name} 은행 날짜 검증: {validation_message}")
+        log_message(f"{bank_name} 은행 날짜 검증: {validation_message} (추출된 날짜: {date_info})")
+
 
         result_data = {
             '날짜정보': date_info,
@@ -932,11 +885,16 @@ def scrape_bank_data(bank_name, driver, progress_manager, expected_dates):
 
         # 데이터 수집 여부 확인
         table_categories = [key for key, data in result_data.items() 
-                          if key not in ['날짜정보', '검증결과', '신선도'] and isinstance(data, list) and data]
+                            if key not in ['날짜정보', '검증결과', '신선도'] and isinstance(data, list) and data]
         
         if not table_categories:
             log_message(f"{bank_name} 은행에서 테이블 데이터를 추출할 수 없습니다.")
+            # 날짜 정보만이라도 있는 경우 반환 (사용자 요청은 날짜가 중요)
+            if date_info not in ["날짜 정보 없음", "날짜 추출 실패"]:
+                 log_message(f"[완료] {bank_name} 은행 테이블 데이터는 없으나 날짜 정보({date_info})는 수집됨.")
+                 return result_data 
             return None
+
 
         log_message(f"[완료] {bank_name} 은행 데이터 수집 완료 (카테고리: {', '.join(table_categories)})")
         return result_data
@@ -962,9 +920,9 @@ def save_bank_data(bank_name, data_dict):
                 '은행명': [bank_name],
                 '공시 날짜': [data_dict.get('날짜정보', '')],
                 '검증 결과': [data_dict.get('검증결과', '')],
-                '데이터 신선도': ['최신' if data_dict.get('신선도', False) else '구버전'],
+                '데이터 신선도': ['최신' if data_dict.get('신선도', False) else '구버전 또는 확인필요'], # 문구 수정
                 '추출 일시': [datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
-                '스크래핑 시스템': ['GitHub Actions 저축은행 스크래퍼 v2.2 (최소 수정)']
+                '스크래핑 시스템': ['GitHub Actions 저축은행 스크래퍼 v2.3 (날짜/이메일 수정)']
             }
             info_df = pd.DataFrame(info_data)
             info_df.to_excel(writer, sheet_name='공시정보', index=False)
@@ -1015,7 +973,7 @@ def worker_process_bank(bank_name, driver_manager, progress_manager, expected_da
         driver = driver_manager.get_driver()
         
         # 최대 재시도 횟수만큼 시도
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(MAX_RETRIES + 1): # MAX_RETRIES 만큼 재시도 (총 MAX_RETRIES+1 번 시도)
             try:
                 # 은행 데이터 스크래핑
                 result_data = scrape_bank_data(bank_name, driver, progress_manager, expected_dates)
@@ -1024,35 +982,55 @@ def worker_process_bank(bank_name, driver_manager, progress_manager, expected_da
                     # 데이터 저장
                     if save_bank_data(bank_name, result_data):
                         progress_manager.mark_completed(bank_name)
-                        return bank_name, True, result_data.get('검증결과', '')
+                        return bank_name, True, result_data.get('날짜정보', ''), result_data.get('신선도', False)
                     else:
-                        if attempt < MAX_RETRIES - 1:
+                        if attempt < MAX_RETRIES:
                             log_message(f"{bank_name} 은행 데이터 저장 실패, 재시도 {attempt+1}/{MAX_RETRIES}...")
                             WaitUtils.wait_with_random(2, 4)
                         else:
                             log_message(f"{bank_name} 은행 데이터 저장 실패, 최대 시도 횟수 초과")
-                else:
-                    if attempt < MAX_RETRIES - 1:
+                else: # result_data가 None인 경우 (스크래핑 실패)
+                    if attempt < MAX_RETRIES:
                         log_message(f"{bank_name} 은행 데이터 스크래핑 실패, 재시도 {attempt+1}/{MAX_RETRIES}...")
+                        # 재시도 전 드라이버 상태 초기화 (예: 기본 URL로 이동)
+                        try:
+                            driver.get("about:blank") 
+                            time.sleep(0.5)
+                        except: pass
                         WaitUtils.wait_with_random(2, 4)
                     else:
                         log_message(f"{bank_name} 은행 데이터 스크래핑 실패, 최대 시도 횟수 초과")
+                
+                if attempt == MAX_RETRIES and not result_data: # 마지막 시도에도 실패하면 최종 실패 처리
+                    break
+
 
             except Exception as e:
-                if attempt < MAX_RETRIES - 1:
+                if attempt < MAX_RETRIES:
                     log_message(f"{bank_name} 은행 처리 중 오류: {str(e)}, 재시도 {attempt+1}/{MAX_RETRIES}...")
                     WaitUtils.wait_with_random(2, 4)
                 else:
                     log_message(f"{bank_name} 은행 처리 실패: {str(e)}, 최대 시도 횟수 초과")
+            
+            if result_data and save_bank_data(bank_name, result_data): # 루프 내에서 성공 시 바로 반환
+                 progress_manager.mark_completed(bank_name)
+                 return bank_name, True, result_data.get('날짜정보', ''), result_data.get('신선도', False)
+
 
         # 모든 시도 실패
         progress_manager.mark_failed(bank_name)
-        return bank_name, False, "모든 시도 실패"
+        # 실패 시 반환 값에 날짜 정보와 신선도 추가 (기본값으로)
+        validation_info = progress_manager.progress.get('data_validation', [])
+        bank_validation = next((item for item in validation_info if item['bank_name'] == bank_name), None)
+        failed_date_info = bank_validation.get('date_info', '추출 실패') if bank_validation else '추출 실패'
+        failed_is_fresh = bank_validation.get('is_fresh', False) if bank_validation else False
+        return bank_name, False, failed_date_info, failed_is_fresh
+
 
     except Exception as e:
         log_message(f"{bank_name} 은행 처리 중 예상치 못한 오류: {str(e)}")
         progress_manager.mark_failed(bank_name)
-        return bank_name, False, f"예상치 못한 오류: {str(e)}"
+        return bank_name, False, f"예상치 못한 오류: {str(e)}", False # 오류 발생 시 기본값
     
     finally:
         if driver and driver_manager:
@@ -1069,8 +1047,10 @@ async def process_banks_async(banks, driver_manager, progress_manager, expected_
     all_results = []
     
     # 배치 단위로 처리 (메모리 효율성)
-    batch_size = max(1, len(banks) // MAX_WORKERS) if len(banks) > MAX_WORKERS else len(banks)
+    # batch_size = max(1, len(banks) // MAX_WORKERS) if len(banks) > MAX_WORKERS else len(banks)
+    batch_size = MAX_WORKERS # 워커 수만큼 배치 크기 설정 또는 더 작은 값으로 조절 가능
     bank_batches = [banks[i:i + batch_size] for i in range(0, len(banks), batch_size)]
+
 
     for batch_idx, batch in enumerate(bank_batches):
         log_message(f"배치 {batch_idx+1}/{len(bank_batches)} 처리 중 ({len(batch)}개 은행)")
@@ -1113,7 +1093,7 @@ async def process_banks_async(banks, driver_manager, progress_manager, expected_
 
     return all_results
 
-def process_with_retry(banks, max_retries=1):
+def process_with_retry(banks, max_retries_main=1): # 파라미터 이름 변경 (MAX_RETRIES와 혼동 방지)
     """실패한 은행을 재시도하는 로직을 포함한 메인 처리 함수입니다."""
     # 예상 데이터 날짜 검증
     expected_dates = validate_data_freshness()
@@ -1129,6 +1109,8 @@ def process_with_retry(banks, max_retries=1):
         pending_banks = banks[:min(5, len(banks))]  # 검증용으로 소수만 재처리
 
     log_message(f"처리할 은행 수: {len(pending_banks)}/{len(banks)}")
+    
+    all_run_results = [] # 모든 실행 결과를 저장 (재시도 포함)
 
     try:
         # 비동기 이벤트 루프 실행
@@ -1137,39 +1119,48 @@ def process_with_retry(banks, max_retries=1):
         else:
             loop = asyncio.get_event_loop()
             results = loop.run_until_complete(process_banks_async(pending_banks, driver_manager, progress_manager, expected_dates))
+        
+        all_run_results.extend(results)
 
         # 결과 분석
-        successful_banks = [r[0] for r in results if r[1]]
-        failed_banks = [r[0] for r in results if not r[1]]
+        successful_banks_names = [r[0] for r in results if r[1]]
+        failed_banks_names = [r[0] for r in results if not r[1]]
 
         # 실패한 은행 재시도
         retry_count = 0
-        while failed_banks and retry_count < max_retries:
+        while failed_banks_names and retry_count < max_retries_main: # worker_process_bank 내 재시도와 별개
             retry_count += 1
-            log_message(f"재시도 {retry_count}/{max_retries}: {len(failed_banks)}개 은행 처리 중...")
+            log_message(f"메인 재시도 {retry_count}/{max_retries_main}: {len(failed_banks_names)}개 은행 처리 중...")
 
             # 재시도 실행
             if sys.version_info >= (3, 7):
-                retry_results = asyncio.run(process_banks_async(failed_banks, driver_manager, progress_manager, expected_dates))
+                retry_results = asyncio.run(process_banks_async(failed_banks_names, driver_manager, progress_manager, expected_dates))
             else:
                 loop = asyncio.get_event_loop()
-                retry_results = loop.run_until_complete(process_banks_async(failed_banks, driver_manager, progress_manager, expected_dates))
+                retry_results = loop.run_until_complete(process_banks_async(failed_banks_names, driver_manager, progress_manager, expected_dates))
+            
+            all_run_results.extend(retry_results)
 
             # 결과 갱신
-            newly_successful = [r[0] for r in retry_results if r[1]]
-            failed_banks = [r[0] for r in retry_results if not r[1]]
+            newly_successful_names = [r[0] for r in retry_results if r[1]]
+            failed_banks_names = [r[0] for r in retry_results if not r[1]] # 재시도 후에도 실패한 은행 목록 갱신
 
-            successful_banks.extend(newly_successful)
-            log_message(f"재시도 {retry_count} 결과: {len(newly_successful)}개 성공, {len(failed_banks)}개 실패")
+            successful_banks_names.extend(newly_successful_names)
+            log_message(f"메인 재시도 {retry_count} 결과: {len(newly_successful_names)}개 성공, {len(failed_banks_names)}개 실패")
 
-        return successful_banks, failed_banks, results
+        # 최종 성공/실패 은행 목록은 progress_manager를 통해 얻는 것이 더 정확할 수 있음
+        final_successful_banks = progress_manager.progress.get('completed', [])
+        final_failed_banks = progress_manager.progress.get('failed', [])
+        
+        return final_successful_banks, final_failed_banks, all_run_results # 모든 실행 결과 반환
 
     finally:
         # 드라이버 정리
         driver_manager.close_all()
 
+
 def generate_summary_report():
-    """스크래핑 결과 요약 보고서를 생성합니다. (기존과 동일)"""
+    """스크래핑 결과 요약 보고서를 생성합니다. (기존과 동일, 데이터 신선도 문구 수정 가능성)"""
     try:
         progress_manager = ProgressManager()
         completed_banks = progress_manager.progress.get('completed', [])
@@ -1206,7 +1197,7 @@ def generate_summary_report():
                     # 공시 정보에서 날짜 및 검증 결과 추출
                     date_info = "날짜 정보 없음"
                     validation_result = "검증 없음"
-                    data_freshness = "알 수 없음"
+                    data_freshness_text = "알 수 없음" 
                     
                     if '공시정보' in xls.sheet_names:
                         info_df = pd.read_excel(file_path, sheet_name='공시정보')
@@ -1215,18 +1206,21 @@ def generate_summary_report():
                         if '검증 결과' in info_df.columns and not info_df['검증 결과'].empty:
                             validation_result = str(info_df['검증 결과'].iloc[0])
                         if '데이터 신선도' in info_df.columns and not info_df['데이터 신선도'].empty:
-                            data_freshness = str(info_df['데이터 신선도'].iloc[0])
+                            data_freshness_text = str(info_df['데이터 신선도'].iloc[0]) # '최신' 또는 '구버전 또는 확인필요'
 
                     # 상태 결정
                     status = '완료' if set(categories) >= set(CATEGORIES) else '부분 완료'
+                    if not categories and date_info in ["날짜 정보 없음", "날짜 추출 실패"]: # 테이블 없고 날짜도 없으면
+                        status = '실패'
+
 
                     bank_summary.append({
                         '은행명': bank,
                         '스크래핑 상태': status,
                         '공시 날짜': date_info,
-                        '데이터 신선도': data_freshness,
+                        '데이터 신선도': data_freshness_text,
                         '검증 결과': validation_result,
-                        '시트 수': sheet_count - 1,  # 공시정보 시트 제외
+                        '시트 수': sheet_count - 1 if sheet_count > 0 else 0,  # 공시정보 시트 제외
                         '스크래핑된 카테고리': ', '.join(categories)
                     })
                     
@@ -1240,15 +1234,23 @@ def generate_summary_report():
                         '시트 수': '확인 불가',
                         '스크래핑된 카테고리': ''
                     })
-            else:
+            else: # 파일이 없는 경우
                 status = '실패' if bank in failed_banks else '미처리'
-                validation_info = validation_dict.get(bank, {})
+                validation_info_item = validation_dict.get(bank, {})
                 
+                date_info_val = validation_info_item.get('date_info', '정보 없음')
+                is_fresh_val = validation_info_item.get('is_fresh', False)
+                
+                freshness_text_val = "알 수 없음"
+                if date_info_val not in ["날짜 정보 없음", "날짜 추출 실패", "정보 없음"]:
+                    freshness_text_val = '최신' if is_fresh_val else '구버전 또는 확인필요'
+
+
                 bank_summary.append({
                     '은행명': bank,
                     '스크래핑 상태': status,
-                    '공시 날짜': validation_info.get('date_info', ''),
-                    '데이터 신선도': '최신' if validation_info.get('is_fresh', False) else '구버전',
+                    '공시 날짜': date_info_val,
+                    '데이터 신선도': freshness_text_val,
                     '검증 결과': '검증 완료' if bank in validation_dict else '검증 안됨',
                     '시트 수': 0,
                     '스크래핑된 카테고리': ''
@@ -1269,7 +1271,7 @@ def generate_summary_report():
             '전체 은행 수': len(BANKS),
             '완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '완료']),
             '부분 완료 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] == '부분 완료']),
-            '실패 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] in ['실패', '파일 손상']]),
+            '실패 은행 수': len([r for r in bank_summary if r['스크래핑 상태'] in ['실패', '파일 손상', '미처리']]), # 미처리도 실패로 간주
             '최신 데이터 은행 수': len([r for r in bank_summary if r['데이터 신선도'] == '최신']),
             '성공률': f"{len([r for r in bank_summary if r['스크래핑 상태'] in ['완료', '부분 완료']]) / len(BANKS) * 100:.2f}%"
         }
@@ -1286,7 +1288,7 @@ def generate_summary_report():
         return None, {}
 
 # =============================================================================
-# 핵심 수정 2: 안정화된 ZIP 파일 생성
+# 핵심 수정 2: 안정화된 ZIP 파일 생성 (기존과 동일)
 # =============================================================================
 
 def create_zip_archive():
@@ -1309,18 +1311,18 @@ def create_zip_archive():
             # OUTPUT_DIR 내의 모든 파일을 ZIP에 추가
             for root, dirs, files in os.walk(OUTPUT_DIR):
                 for file in files:
-                    file_path = os.path.join(root, file)
+                    file_path_to_zip = os.path.join(root, file) # 변수명 변경
                     
                     # 파일이 존재하고 읽을 수 있는지 확인
-                    if os.path.exists(file_path) and os.path.isfile(file_path):
+                    if os.path.exists(file_path_to_zip) and os.path.isfile(file_path_to_zip):
                         try:
                             # ZIP 내에서의 상대 경로 계산
-                            arcname = os.path.relpath(file_path, OUTPUT_BASE_DIR)
+                            arcname = os.path.relpath(file_path_to_zip, OUTPUT_BASE_DIR)
                             
                             # 파일을 ZIP에 추가
-                            zipf.write(file_path, arcname)
+                            zipf.write(file_path_to_zip, arcname)
                             
-                            file_size = os.path.getsize(file_path)
+                            file_size = os.path.getsize(file_path_to_zip)
                             total_size += file_size
                             file_count += 1
                             
@@ -1330,33 +1332,27 @@ def create_zip_archive():
                             log_message(f"파일 ZIP 추가 실패 ({file}): {str(e)}")
             
             # ZIP 파일 정보 추가 (메타데이터)
-            info_content = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑 결과 (최소 수정 버전)
+            info_content = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑 결과 (v2.3 날짜/이메일 수정)
 
 생성일시: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분 %S초')}
 포함 파일 수: {file_count}개
 총 용량: {total_size:,} bytes
-스크래핑 대상: 79개 저축은행
+스크래핑 대상: {len(BANKS)}개 저축은행
 데이터 기준일: 2024년 9월말 / 2025년 3월말
 
-🔧 이번 버전의 개선사항 (최소 수정):
-✅ 날짜 추출 정확도 향상 (안국, 오투 은행 등 문제 은행만 특별 처리)
+🔧 이번 버전의 개선사항 (v2.3):
+✅ 날짜 추출 정확도 향상 (사용자 지정 '2024년9월말', '2025년3월말'만 유효 처리)
 ✅ ZIP 파일 생성 완전 안정화 (.bin 오류 근본 해결)
-✅ 기존 7-8분 처리 속도 유지
-✅ 스크린샷 형태 결과 테이블 추가 (별도 생성)
+✅ 스크린샷 형태 결과 테이블 생성 및 이메일 본문에 유사 테이블 추가
 
 파일 구성:
 - 각 은행별 Excel 파일 (.xlsx)
 - 스크래핑 요약 보고서 (Excel)
-- 스크린샷 형태 날짜 확인 결과 (Excel) - 별도 생성 예정
+- 은행별 날짜 확인 결과 (Excel)
 - 실행 로그 파일 (.log)
 - 진행 상황 파일 (.json)
 
-사용법:
-1. ZIP 파일 압축 해제 (이제 .bin 오류 없음)
-2. 요약 보고서에서 전체 현황 확인
-3. 개별 은행 Excel 파일에서 상세 데이터 확인
-
-GitHub Actions 저축은행 스크래퍼 v2.2 (최소 수정 - 성능 유지)
+GitHub Actions 저축은행 스크래퍼 v2.3 (날짜/이메일 수정)
 """
             
             # 정보 파일을 ZIP에 추가
@@ -1381,7 +1377,7 @@ GitHub Actions 저축은행 스크래퍼 v2.2 (최소 수정 - 성능 유지)
         else:
             log_message("❌ ZIP 파일 생성에 실패했습니다.")
             return None
-        
+            
     except Exception as e:
         log_message(f"❌ ZIP 아카이브 생성 실패: {str(e)}")
         import traceback
@@ -1389,101 +1385,64 @@ GitHub Actions 저축은행 스크래퍼 v2.2 (최소 수정 - 성능 유지)
         return None
 
 # =============================================================================
-# 핵심 수정 3: 스크린샷 형태 결과 테이블 (별도 함수)
+# 핵심 수정 3: 스크린샷 형태 결과 테이블 (Excel 및 이메일용 데이터 생성)
 # =============================================================================
 
-def generate_screenshot_format_report():
-    """스크린샷과 동일한 형태의 은행별 날짜 확인 테이블을 생성합니다."""
+def generate_screenshot_format_report(all_run_results): # worker_process_bank 결과 사용
+    """스크린샷과 동일한 형태의 은행별 날짜 확인 테이블을 생성하고, 이메일용 데이터도 반환합니다."""
     try:
-        progress_manager = ProgressManager()
-        validation_data = progress_manager.progress.get('data_validation', [])
-        validation_dict = {item['bank_name']: item for item in validation_data}
+        # all_run_results: [(bank_name, success_bool, date_info_str, is_fresh_bool), ...]
         
-        # 현재 시간
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 테이블 데이터 생성
-        table_data = []
-        
-        for bank in BANKS:
-            # 각 은행의 엑셀 파일 찾기
-            bank_files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(f"{bank}_") and f.endswith(".xlsx")]
+        table_data = [] # Excel 및 이메일용 데이터
+
+        for bank_result in all_run_results:
+            bank_name, success, date_info_raw, is_fresh = bank_result
             
-            date_info = "데이터 없음"
-            date_status = "❌ 미처리"
-            processing_status = "실패"
+            date_info_for_report = str(date_info_raw) # 문자열로 변환
             
-            if bank_files:
-                try:
-                    # 가장 최근 파일 선택
-                    latest_file = sorted(bank_files)[-1]
-                    file_path = os.path.join(OUTPUT_DIR, latest_file)
-                    
-                    # 공시 정보에서 날짜 추출
-                    if os.path.exists(file_path):
-                        try:
-                            info_df = pd.read_excel(file_path, sheet_name='공시정보')
-                            if '공시 날짜' in info_df.columns and not info_df['공시 날짜'].empty:
-                                date_info = str(info_df['공시 날짜'].iloc[0])
-                                processing_status = "완료"
-                                
-                                # 날짜에 따른 상태 결정
-                                if '2024년9월말' in date_info or '2024년09월말' in date_info:
-                                    date_status = "✅ 일치 (기한내최신)"
-                                elif '2025년3월말' in date_info or '2025년03월말' in date_info:
-                                    date_status = "🟢 일치 (예정보다선반영)"
-                                else:
-                                    date_status = "⚠️ 확인필요"
-                                    
-                        except Exception as e:
-                            date_info = f"파일 읽기 오류: {str(e)}"
-                            date_status = "❌ 오류"
-                            processing_status = "실패"
-                            
-                except Exception as e:
-                    date_info = f"파일 처리 오류: {str(e)}"
-                    date_status = "❌ 오류"
-                    processing_status = "실패"
-            else:
-                # 검증 데이터에서 정보 가져오기
-                if bank in validation_dict:
-                    validation_info = validation_dict[bank]
-                    date_info = validation_info.get('date_info', '추출 실패')
-                    
-                    if validation_info.get('is_fresh', False):
-                        if '2024년9월' in date_info:
-                            date_status = "✅ 일치 (기한내최신)"
-                        elif '2025년3월' in date_info:
-                            date_status = "🟢 일치 (예정보다선반영)"
-                        else:
-                            date_status = "⚠️ 확인필요"
-                        processing_status = "부분완료"
-                    else:
-                        if '날짜' in date_info and ('2024' in date_info or '2025' in date_info):
-                            date_status = "⚠️ 확인필요"
-                            processing_status = "부분완료"
-                        else:
-                            date_status = "❌ 불일치"
-                            processing_status = "부분완료"
-                else:
-                    date_info = "처리되지 않음"
-                    date_status = "❌ 미처리"
-                    processing_status = "실패"
-            
+            # 처리상태 결정
+            if success:
+                processing_status = "완료"
+            else: # 실패한 경우, progress_manager에서 최종 상태 확인 가능하나, 여기서는 단순화
+                processing_status = "실패"
+                # 실패 시 날짜 정보가 오류 메시지일 수 있으므로, "추출 실패" 등으로 통일
+                if "오류" in date_info_for_report or "실패" in date_info_for_report:
+                     date_info_for_report = "추출 실패"
+
+
+            # 날짜 확인 상태 결정
+            date_status = "⚠️ 확인필요" # 기본값
+            if date_info_for_report in ["날짜 정보 없음", "추출 실패"]:
+                date_status = "❌ 미처리/오류"
+            elif is_fresh: # is_fresh가 True이면 사용자가 원하는 두 날짜 중 하나임
+                if "2024년9월말" in date_info_for_report: # extract_date_information에서 정규화된 값
+                    date_status = "✅ 일치 (기한내최신)"
+                elif "2025년3월말" in date_info_for_report:
+                    date_status = "🟢 일치 (예정보다선반영)"
+                else: # is_fresh가 True인데, 위의 특정 문자열이 없다면 일반적인 '일치'
+                    date_status = "✅ 일치 (확인됨)" 
+            else: # is_fresh가 False (유효한 두 날짜가 아님)
+                if date_info_for_report not in ["날짜 정보 없음", "추출 실패"]: # 날짜는 있지만 구버전
+                     date_status = "⚠️ 불일치 (구버전)"
+                else: # 날짜 정보 자체가 없는 경우
+                     date_status = "❌ 미처리/오류"
+
+
             table_data.append({
-                '은행명': bank,
-                '공시 날짜(월말)': date_info,
+                '은행명': bank_name,
+                '공시 날짜(월말)': date_info_for_report,
                 '날짜 확인': date_status,
                 '처리상태': processing_status,
-                '확인 시간': current_time
+                '확인 시간': current_time 
             })
         
         # DataFrame 생성
         result_df = pd.DataFrame(table_data)
         
         # 상태별로 정렬
-        status_order = {'완료': 0, '부분완료': 1, '실패': 2}
-        result_df['정렬순서'] = result_df['처리상태'].map(status_order)
+        status_order = {'완료': 0, '실패': 1} # 처리상태 단순화
+        result_df['정렬순서'] = result_df['처리상태'].map(status_order).fillna(2) # NaN은 마지막으로
         result_df = result_df.sort_values(['정렬순서', '은행명']).drop('정렬순서', axis=1)
         
         # 스크린샷 형태의 결과 파일 저장
@@ -1497,246 +1456,148 @@ def generate_screenshot_format_report():
             stats_data = {
                 '구분': [
                     '전체 은행 수',
-                    '완료된 은행 수',
+                    '완료된 은행 수 (처리상태 기준)',
                     '2024년9월말 데이터',
                     '2025년3월말 데이터',
-                    '기타 날짜 데이터',
-                    '처리 실패 은행',
-                    '성공률'
+                    '기타/오래된 날짜 데이터',
+                    '처리 실패 은행 (처리상태 기준)',
+                    '성공률 (처리상태 기준)'
                 ],
                 '수량': [
                     len(BANKS),
                     len([r for r in table_data if r['처리상태'] == '완료']),
-                    len([r for r in table_data if '2024년9월' in r['공시 날짜(월말)']]),
-                    len([r for r in table_data if '2025년3월' in r['공시 날짜(월말)']]),
-                    len([r for r in table_data if '2024년9월' not in r['공시 날짜(월말)'] and '2025년3월' not in r['공시 날짜(월말)'] and r['처리상태'] != '실패']),
+                    len([r for r in table_data if "2024년9월말" in r['공시 날짜(월말)']]),
+                    len([r for r in table_data if "2025년3월말" in r['공시 날짜(월말)']]),
+                    len([r for r in table_data if r['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"] and r['처리상태'] == '완료']),
                     len([r for r in table_data if r['처리상태'] == '실패']),
-                    f"{len([r for r in table_data if r['처리상태'] in ['완료', '부분완료']]) / len(BANKS) * 100:.1f}%"
+                    f"{len([r for r in table_data if r['처리상태'] == '완료']) / len(BANKS) * 100:.1f}%" if len(BANKS) > 0 else "N/A"
                 ]
             }
             
             stats_df = pd.DataFrame(stats_data)
             stats_df.to_excel(writer, sheet_name='통계요약', index=False)
             
-            # 문제 은행 목록
-            problem_banks = [
+            # 문제 은행 목록 (날짜 확인이 '확인필요', '불일치', '미처리/오류' 인 경우)
+            problem_banks_report = [
                 r for r in table_data 
-                if r['날짜 확인'] in ['⚠️ 확인필요', '❌ 불일치', '❌ 미처리', '❌ 오류']
+                if r['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"]
             ]
             
-            if problem_banks:
-                problem_df = pd.DataFrame(problem_banks)
+            if problem_banks_report:
+                problem_df = pd.DataFrame(problem_banks_report)
                 problem_df.to_excel(writer, sheet_name='문제은행목록', index=False)
         
         log_message(f"스크린샷 형태 결과 파일 저장 완료: {screenshot_format_file}")
         
         # 콘솔에 간단한 요약 출력
         log_message(f"\n📋 은행별 날짜 확인 결과 요약:")
-        status_summary = result_df['처리상태'].value_counts()
-        for status, count in status_summary.items():
+        status_summary_report = result_df['처리상태'].value_counts()
+        for status, count in status_summary_report.items():
             log_message(f"  • {status}: {count}개")
         
-        date_check_summary = result_df['날짜 확인'].value_counts()
+        date_check_summary_report = result_df['날짜 확인'].value_counts()
         log_message(f"\n📅 날짜 확인 상태:")
-        for status, count in date_check_summary.items():
+        for status, count in date_check_summary_report.items():
             log_message(f"  • {status}: {count}개")
         
-        return screenshot_format_file, problem_banks
-        
+        return screenshot_format_file, table_data # Excel 파일 경로와 테이블 데이터 반환
+            
     except Exception as e:
         log_message(f"스크린샷 형태 보고서 생성 오류: {str(e)}")
+        import traceback
+        log_message(traceback.format_exc())
         return None, []
 
-def collect_bank_details():
-    """각 은행별 상세 정보를 수집합니다. (기존과 동일)"""
-    bank_details = []
-    progress_manager = ProgressManager()
-    
-    try:
-        validation_data = progress_manager.progress.get('data_validation', [])
-        validation_dict = {item['bank_name']: item for item in validation_data}
-        
-        for bank in BANKS:
-            bank_info = {
-                'name': bank,
-                'status': 'failed',
-                'date_info': '데이터 없음',
-                'is_fresh': False,
-                'categories': [],
-                'error_reason': '처리되지 않음'
-            }
-            
-            bank_files = [f for f in os.listdir(OUTPUT_DIR) if f.startswith(f"{bank}_") and f.endswith(".xlsx")]
-            
-            if bank_files:
-                try:
-                    latest_file = sorted(bank_files)[-1]
-                    file_path = os.path.join(OUTPUT_DIR, latest_file)
-                    
-                    xls = pd.ExcelFile(file_path)
-                    
-                    categories = []
-                    for sheet in xls.sheet_names:
-                        if sheet != '공시정보':
-                            category = sheet.split('_')[0] if '_' in sheet else sheet
-                            categories.append(category)
-                    
-                    categories = sorted(list(set(categories)))
-                    bank_info['categories'] = categories
-                    
-                    if '공시정보' in xls.sheet_names:
-                        info_df = pd.read_excel(file_path, sheet_name='공시정보')
-                        if '공시 날짜' in info_df.columns and not info_df['공시 날짜'].empty:
-                            bank_info['date_info'] = str(info_df['공시 날짜'].iloc[0])
-                        if '데이터 신선도' in info_df.columns and not info_df['데이터 신선도'].empty:
-                            bank_info['is_fresh'] = str(info_df['데이터 신선도'].iloc[0]) == '최신'
-                    
-                    if set(categories) >= set(CATEGORIES):
-                        bank_info['status'] = 'success'
-                    elif categories:
-                        bank_info['status'] = 'partial'
-                        bank_info['error_reason'] = f"누락된 카테고리: {', '.join(set(CATEGORIES) - set(categories))}"
-                    else:
-                        bank_info['status'] = 'failed'
-                        bank_info['error_reason'] = '테이블 추출 실패'
-                        
-                except Exception as e:
-                    bank_info['error_reason'] = f'파일 분석 오류: {str(e)}'
-            else:
-                if bank in validation_dict:
-                    validation_info = validation_dict[bank]
-                    bank_info['date_info'] = validation_info.get('date_info', '날짜 정보 없음')
-                    bank_info['is_fresh'] = validation_info.get('is_fresh', False)
-                    bank_info['error_reason'] = '데이터 추출 완료되었으나 파일 저장 실패'
-                else:
-                    bank_info['error_reason'] = '은행 페이지 접근 실패'
-            
-            bank_details.append(bank_info)
-        
-        return bank_details
-        
-    except Exception as e:
-        log_message(f"은행 상세 정보 수집 실패: {str(e)}")
-        return []
 
-def send_email_notification(subject, body, bank_details=None, attachment_paths=None, is_success=True, expected_dates=None):
-    """Gmail SMTP를 통해 이메일 알림을 발송합니다. (개선된 MIME 처리)"""
+def send_email_notification(subject, body_text_part, email_table_data=None, attachment_paths=None, is_overall_success=True, expected_dates_for_email=None):
+    """Gmail SMTP를 통해 이메일 알림을 발송합니다. HTML 테이블 포함."""
     if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD or not RECIPIENT_EMAILS:
         log_message("이메일 설정이 불완전하여 알림을 발송하지 않습니다.")
         return False
     
     try:
-        # 이메일 메시지 구성
-        msg = MIMEMultipart()
+        msg = MIMEMultipart('alternative') # HTML과 Plain Text를 모두 지원하기 위해 'alternative' 사용
         msg['From'] = GMAIL_ADDRESS
         msg['To'] = ', '.join(RECIPIENT_EMAILS)
         msg['Subject'] = subject
         
-        # 은행별 상세 정보를 본문에 추가
-        enhanced_body = body
+        # Plain text 본문 (기존 body_text_part 사용)
+        msg.attach(MIMEText(body_text_part, 'plain', 'utf-8'))
+
+        # HTML 본문 생성
+        html_body_content = f"""
+        <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; }}
+              table {{ border-collapse: collapse; width: 95%; margin: 20px auto; font-size: 10pt; }}
+              th, td {{ border: 1px solid #dddddd; text-align: left; padding: 6px; }}
+              th {{ background-color: #f2f2f2; }}
+              h2 {{ color: #333366; margin-left: 15px;}}
+              p {{ margin-left: 15px; line-height: 1.6;}}
+              .summary-section p {{ margin-left: 0; }} /* 요약 섹션의 p 태그 마진 초기화 */
+            </style>
+          </head>
+          <body>
+            <div class="summary-section">
+              {body_text_part.replace("\\n", "<br>")}
+            </div>
+        """
+
+        if expected_dates_for_email:
+            html_body_content += f"""
+            <h2>데이터 신선도 검증 기준</h2>
+            <p>
+              📅 예상 최신 데이터 분기: {expected_dates_for_email[0]}<br>
+              📅 조기 업로드 가능 분기 (또는 다른 유효 분기): {expected_dates_for_email[1]}<br>
+              ⚠️ 이 기준과 다른 날짜의 데이터는 구버전이거나 추출 오류일 가능성이 있습니다.
+            </p>
+            """
+
+        if email_table_data:
+            html_body_content += "<h2>은행별 날짜 확인 결과 상세</h2><table><thead><tr>"
+            headers = ['은행명', '공시 날짜(월말)', '날짜 확인', '처리상태', '확인 시간']
+            for header in headers:
+                html_body_content += f"<th>{header}</th>"
+            html_body_content += "</tr></thead><tbody>"
+
+            for item in email_table_data:
+                html_body_content += "<tr>"
+                html_body_content += f"<td>{item.get('은행명', '')}</td>"
+                html_body_content += f"<td>{item.get('공시 날짜(월말)', '')}</td>"
+                html_body_content += f"<td>{item.get('날짜 확인', '')}</td>"
+                html_body_content += f"<td>{item.get('처리상태', '')}</td>"
+                html_body_content += f"<td>{item.get('확인 시간', '')}</td>"
+                html_body_content += "</tr>"
+            
+            html_body_content += "</tbody></table>"
         
-        # 날짜 검증 정보 추가
-        if expected_dates:
-            enhanced_body += f"\n\n===== 데이터 신선도 검증 기준 =====\n"
-            enhanced_body += f"📅 예상 최신 데이터 분기: {expected_dates[0]}\n"
-            enhanced_body += f"📅 조기 업로드 가능 분기: {expected_dates[1]}\n"
-            enhanced_body += f"⚠️  이 기준과 다른 날짜의 데이터는 구버전이거나 추출 오류일 가능성이 있습니다.\n"
+        html_body_content += "</body></html>"
+        msg.attach(MIMEText(html_body_content, 'html', 'utf-8'))
         
-        if bank_details:
-            enhanced_body += "\n\n===== 은행별 상세 결과 =====\n"
-            
-            # 성공한 은행들 (날짜별로 그룹화)
-            successful_banks = [bank for bank in bank_details if bank['status'] == 'success']
-            if successful_banks:
-                enhanced_body += f"\n✅ 완전 성공한 은행 ({len(successful_banks)}개):\n"
-                
-                # 최신 데이터 은행들
-                fresh_successful = [bank for bank in successful_banks if bank.get('is_fresh', False)]
-                if fresh_successful:
-                    enhanced_body += f"\n  🟢 최신 데이터 ({len(fresh_successful)}개):\n"
-                    for bank in fresh_successful:
-                        enhanced_body += f"    • {bank['name']}: {bank['date_info']}\n"
-                
-                # 구버전 데이터 은행들
-                old_successful = [bank for bank in successful_banks if not bank.get('is_fresh', False)]
-                if old_successful:
-                    enhanced_body += f"\n  🟡 구버전 데이터 ({len(old_successful)}개):\n"
-                    for bank in old_successful:
-                        enhanced_body += f"    • {bank['name']}: {bank['date_info']}\n"
-            
-            # 부분 성공한 은행들  
-            partial_banks = [bank for bank in bank_details if bank['status'] == 'partial']
-            if partial_banks:
-                enhanced_body += f"\n⚠️ 부분 성공한 은행 ({len(partial_banks)}개):\n"
-                for bank in partial_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank['date_info']} (누락: {bank.get('error_reason', '알 수 없음')})\n"
-            
-            # 실패한 은행들
-            failed_banks = [bank for bank in bank_details if bank['status'] == 'failed']
-            if failed_banks:
-                enhanced_body += f"\n❌ 실패한 은행 ({len(failed_banks)}개):\n"
-                for bank in failed_banks:
-                    enhanced_body += f"  • {bank['name']}: {bank.get('error_reason', '알 수 없는 오류')}\n"
-            
-            # 데이터 품질 요약
-            total_banks = len(bank_details)
-            fresh_count = len([bank for bank in bank_details if bank.get('is_fresh', False)])
-            old_count = len([bank for bank in bank_details if not bank.get('is_fresh', False) and bank['status'] in ['success', 'partial']])
-            
-            enhanced_body += f"\n\n===== 데이터 품질 요약 =====\n"
-            enhanced_body += f"📊 전체 처리 은행: {total_banks}개\n"
-            enhanced_body += f"🟢 최신 분기 데이터: {fresh_count}개 ({fresh_count/total_banks*100:.1f}%)\n"
-            enhanced_body += f"🟡 구버전 분기 데이터: {old_count}개 ({old_count/total_banks*100:.1f}%)\n"
-            
-            if old_count > fresh_count:
-                enhanced_body += f"\n⚠️ 주의: 구버전 데이터가 최신 데이터보다 많습니다.\n"
-            elif fresh_count > 0:
-                enhanced_body += f"\n✅ 양호: {fresh_count}개 은행에서 최신 분기 데이터를 확인했습니다.\n"
-        
-        # 본문 추가
-        msg.attach(MIMEText(enhanced_body, 'plain', 'utf-8'))
-        
-        # 첨부 파일 추가 (ZIP 파일 우선, MIME 타입 명시)
+        # 첨부 파일 추가
         if attachment_paths:
             for file_path in attachment_paths:
                 if os.path.exists(file_path):
                     try:
                         filename = os.path.basename(file_path)
+                        ctype, encoding = encoders.encode_base64, None # 기본값
                         
-                        # 파일 타입별로 MIME 타입 명시적 설정
                         if filename.endswith('.zip'):
-                            part = MIMEBase('application', 'zip')
-                            with open(file_path, "rb") as attachment:
-                                part.set_payload(attachment.read())
-                            encoders.encode_base64(part)
-                            part.add_header(
-                                'Content-Disposition',
-                                f'attachment; filename="{filename}"',
-                            )
-                            part.add_header('Content-Type', 'application/zip')
-                            log_message(f"📎 ZIP 압축파일 첨부: {filename}")
+                            maintype, subtype = 'application', 'zip'
                         elif filename.endswith('.xlsx'):
-                            part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                            with open(file_path, "rb") as attachment:
-                                part.set_payload(attachment.read())
-                            encoders.encode_base64(part)
-                            part.add_header(
-                                'Content-Disposition',
-                                f'attachment; filename="{filename}"',
-                            )
-                            log_message(f"📎 Excel 파일 첨부: {filename}")
-                        else:
-                            part = MIMEBase('application', 'octet-stream')
-                            with open(file_path, "rb") as attachment:
-                                part.set_payload(attachment.read())
-                            encoders.encode_base64(part)
-                            part.add_header(
-                                'Content-Disposition',
-                                f'attachment; filename="{filename}"',
-                            )
-                            log_message(f"📎 첨부 파일 추가: {filename}")
-                            
+                            maintype, subtype = 'application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        else: # 기타 파일
+                            maintype, subtype = 'application', 'octet-stream'
+
+                        with open(file_path, "rb") as fp:
+                            part = MIMEBase(maintype, subtype)
+                            part.set_payload(fp.read())
+                        encoders.encode_base64(part)
+                        part.add_header('Content-Disposition', 'attachment', filename=filename)
                         msg.attach(part)
+                        log_message(f"📎 파일 첨부: {filename}")
                     except Exception as e:
                         log_message(f"첨부 파일 추가 실패 ({file_path}): {str(e)}")
         
@@ -1748,9 +1609,11 @@ def send_email_notification(subject, body, bank_details=None, attachment_paths=N
         
         log_message(f"📧 이메일 알림 발송 완료: {', '.join(RECIPIENT_EMAILS)}")
         return True
-        
+            
     except Exception as e:
         log_message(f"❌ 이메일 발송 실패: {str(e)}")
+        import traceback
+        log_message(traceback.format_exc())
         return False
 
 # =============================================================================
@@ -1758,183 +1621,144 @@ def send_email_notification(subject, body, bank_details=None, attachment_paths=N
 # =============================================================================
 
 def main():
-    """최소 수정으로 문제 해결한 메인 실행 함수 (기존 7-8분 성능 유지)"""
+    """최소 수정으로 문제 해결한 메인 실행 함수"""
     # 로그 파일 초기화
     try:
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
-            f.write("")
+            f.write("") 
     except Exception as e:
         print(f"로그 파일 초기화 실패: {e}")
 
     start_time = time.time()
-    log_message(f"\n🚀 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 시작 (최소 수정 버전 v2.2) [{TODAY}] =====\n")
+    log_message(f"\n🚀 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 시작 (v2.3 날짜/이메일 수정) [{TODAY}] =====\n")
 
     try:
-        # 개선사항 설명
-        log_message(f"🔧 이번 버전의 최소 수정사항:")
-        log_message(f"  ✅ 날짜 추출 문제 해결: 안국, 오투 은행만 특별 처리 (나머지는 기존 방식 유지)")
-        log_message(f"  ✅ ZIP 파일 생성 안정화: .bin 오류 완전 해결")
-        log_message(f"  ✅ 스크린샷 형태 결과 테이블: 별도 함수로 생성")
-        log_message(f"  ⚡ 기존 7-8분 처리 속도: 완전 유지")
+        log_message(f"🔧 이번 버전의 수정사항 (v2.3):")
+        log_message(f"  ✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리")
+        log_message(f"  ✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가")
+        log_message(f"  ✅ ZIP 파일 생성 안정화 및 README 내용 업데이트")
         
         log_message(f"\n⚙️ 현재 설정값:")
         log_message(f"  • 최대 워커 수: {MAX_WORKERS}개")
-        log_message(f"  • 최대 재시도 횟수: {MAX_RETRIES}회")
-        log_message(f"  • 페이지 로드 타임아웃: {PAGE_LOAD_TIMEOUT}초")
-        log_message(f"  • 대기 타임아웃: {WAIT_TIMEOUT}초")
-        log_message(f"  • 문제 은행 특별 처리: {', '.join(PROBLEM_BANKS)}")
+        log_message(f"  • 최대 재시도 횟수 (메인): 1회 (워커 내 재시도: {MAX_RETRIES}회)")
         log_message(f"  • 이메일 알림: {'✅ 활성화' if GMAIL_ADDRESS and GMAIL_APP_PASSWORD else '❌ 비활성화'}")
 
-        # 은행 처리 실행 (기존 방식 유지)
-        log_message(f"\n🏦 79개 저축은행 데이터 스크래핑 시작...")
-        successful_banks, failed_banks, all_results = process_with_retry(BANKS, max_retries=MAX_RETRIES)
+        log_message(f"\n🏦 {len(BANKS)}개 저축은행 데이터 스크래핑 시작...")
+        successful_banks, failed_banks, all_run_results_for_report = process_with_retry(BANKS, max_retries_main=1)
 
-        # 결과 요약 생성 (기존 방식)
+
         log_message(f"\n📊 결과 요약 보고서 생성 중...")
-        summary_file, stats = generate_summary_report()
+        summary_file, stats = generate_summary_report() # progress_manager 기반 요약
 
-        # 스크린샷 형태 결과 생성 (신규 기능 - 별도 실행)
         log_message(f"📋 스크린샷 형태 결과 테이블 생성 중...")
-        screenshot_file, problem_banks = generate_screenshot_format_report()
+        # all_run_results_for_report는 worker_process_bank의 반환값 리스트 [(bank, success, date_info, is_fresh), ...]
+        screenshot_file, email_table_data = generate_screenshot_format_report(all_run_results_for_report)
 
-        # 안정화된 ZIP 아카이브 생성
+
         log_message(f"📦 ZIP 압축 파일 생성 중...")
         zip_file = create_zip_archive()
 
-        # 실행 시간 계산
         end_time = time.time()
         total_duration = end_time - start_time
         minutes, seconds = divmod(total_duration, 60)
         
-        # 성능 목표 달성 여부 체크
         target_achieved = total_duration <= 8 * 60  # 8분 이내 목표
-        
-        # 최종 결과 로그
-        log_message(f"\n🎉 ===== 스크래핑 완료 (최소 수정 버전 v2.2) =====")
+
+        log_message(f"\n🎉 ===== 스크래핑 완료 (v2.3 날짜/이메일 수정) =====")
         log_message(f"⏰ 총 실행 시간: {int(minutes)}분 {int(seconds)}초")
         log_message(f"🎯 성능 목표: {'✅ 달성 (8분 이내)' if target_achieved else '⚠️ 목표 초과'}")
-        log_message(f"✅ 성공한 은행: {len(successful_banks)}개")
-        log_message(f"❌ 실패한 은행: {len(failed_banks)}개")
+        log_message(f"✅ 성공한 은행 (ProgressManager 기준): {len(successful_banks)}개")
+        log_message(f"❌ 실패한 은행 (ProgressManager 기준): {len(failed_banks)}개")
         
         if failed_banks:
-            log_message(f"🔍 실패한 은행 목록: {', '.join(failed_banks)}")
+            log_message(f"🔍 실패한 은행 목록 (ProgressManager 기준): {', '.join(failed_banks)}")
 
-        if problem_banks:
-            log_message(f"⚠️ 날짜 확인 필요 은행: {len(problem_banks)}개")
-            for bank in problem_banks[:5]:  # 상위 5개만 표시
-                log_message(f"   • {bank['은행명']}: {bank['공시 날짜(월말)']} ({bank['날짜 확인']})")
-            if len(problem_banks) > 5:
-                log_message(f"   ... 기타 {len(problem_banks) - 5}개 은행")
+        # generate_screenshot_format_report에서 생성된 문제 은행 정보 활용 가능
+        if email_table_data: # email_table_data가 생성되었다면
+            problem_banks_from_report = [b for b in email_table_data if b['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"]]
+            if problem_banks_from_report:
+                log_message(f"⚠️ 날짜 확인 필요 은행 (보고서 기준): {len(problem_banks_from_report)}개")
+                for bank_report_item in problem_banks_from_report[:5]:
+                    log_message(f"    • {bank_report_item['은행명']}: {bank_report_item['공시 날짜(월말)']} ({bank_report_item['날짜 확인']})")
+                if len(problem_banks_from_report) > 5:
+                    log_message(f"    ... 기타 {len(problem_banks_from_report) - 5}개 은행")
 
-        # 생성된 파일 목록
+
         log_message(f"\n📁 생성된 파일 목록:")
         if zip_file:
-            log_message(f"  📦 ZIP 압축파일: {os.path.basename(zip_file)} ✅ (.bin 오류 해결)")
+            log_message(f"  📦 ZIP 압축파일: {os.path.basename(zip_file)} ✅")
         else:
             log_message(f"  📦 ZIP 압축파일: 생성 실패 ❌")
             
         if screenshot_file:
-            log_message(f"  📋 스크린샷 형태 결과: {os.path.basename(screenshot_file)} ✅")
+            log_message(f"  📋 은행별 날짜확인 결과(Excel): {os.path.basename(screenshot_file)} ✅")
         else:
-            log_message(f"  📋 스크린샷 형태 결과: 생성 실패 ❌")
+            log_message(f"  📋 은행별 날짜확인 결과(Excel): 생성 실패 ❌")
             
         if summary_file:
-            log_message(f"  📊 요약 보고서: {os.path.basename(summary_file)} ✅")
+            log_message(f"  📊 요약 보고서(Excel): {os.path.basename(summary_file)} ✅")
         else:
-            log_message(f"  📊 요약 보고서: 생성 실패 ❌")
+            log_message(f"  📊 요약 보고서(Excel): 생성 실패 ❌")
 
         log_message(f"  📄 실행 로그: {os.path.basename(LOG_FILE)} ✅")
 
-        # 이메일 알림 발송
         if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and RECIPIENT_EMAILS:
             log_message(f"\n📧 이메일 알림 발송 중...")
             
-            # 은행별 상세 정보 수집
-            bank_details = collect_bank_details()
+            subject_email = f"📊 저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} (v2.3) - {int(minutes)}분{int(seconds)}초"
             
-            subject = f"📊 저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} (v2.2 최소수정) - {int(minutes)}분{int(seconds)}초"
-            
-            body = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.
+            body_text_email = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.
 
-🔧 v2.2 최소 수정 버전의 특징:
-✅ 기존 7-8분 처리 속도 완전 유지
-✅ 날짜 추출 정확도 향상 (문제 은행만 특별 처리)
-✅ ZIP 파일 생성 완전 안정화 (.bin 오류 근본 해결)  
-✅ 스크린샷과 동일한 형태의 결과 테이블 추가
-✅ 최소 침습적 수정으로 기존 성능 보장
+� v2.3 수정 버전의 특징:
+✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리
+✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가
+✅ ZIP 파일 생성 안정화 및 README 내용 업데이트
 
 📊 실행 정보:
 - 🕐 실행 날짜: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}
 - ⏱️ 총 실행 시간: {int(minutes)}분 {int(seconds)}초 ({'목표 달성' if target_achieved else '목표 초과'})
-- 🏗️ 처리 환경: GitHub Actions (최소 수정 버전)
-- 🎯 처리 대상: 전국 79개 저축은행
+- 🎯 처리 대상: 전국 {len(BANKS)}개 저축은행
 
-📈 스크래핑 결과 요약:
+📈 스크래핑 결과 요약 (ProgressManager 기준):
 - 🏦 전체 은행 수: {stats.get('전체 은행 수', len(BANKS))}개
 - ✅ 완료 은행 수: {stats.get('완료 은행 수', len(successful_banks))}개
 - ⚠️ 부분 완료 은행 수: {stats.get('부분 완료 은행 수', 0)}개
 - ❌ 실패 은행 수: {stats.get('실패 은행 수', len(failed_banks))}개
-- 🟢 최신 데이터 은행 수: {stats.get('최신 데이터 은행 수', 0)}개
-- 📊 전체 성공률: {stats.get('성공률', '0.00%')}
+- 🟢 최신 데이터 은행 수 (공시정보 기준): {stats.get('최신 데이터 은행 수', 0)}개
+- 📊 전체 성공률 (완료+부분완료): {stats.get('성공률', '0.00%')}
 
-🔧 핵심 개선사항:
-• 안국, 오투 은행 등 문제 은행만 정밀 날짜 추출 적용
-• 나머지 77개 은행은 기존 빠른 방식 유지
-• ZIP 파일 MIME 타입 명시적 설정으로 .bin 오류 완전 해결
-
-📦 첨부 파일 (우선순위 순):
-1. 🗜️ ZIP 압축파일 - 모든 데이터 포함 (.zip 확장자 보장)
-2. 📋 스크린샷 형태 결과 - 화면과 동일한 날짜 확인 테이블
-3. 📊 종합 요약 보고서 - 전체 현황 및 통계 분석 
-4. 📄 상세 실행 로그 - 디버깅 및 문제 해결용
-
-💡 사용 권장사항:
-• ZIP 파일이 이제 .bin 오류 없이 정상 압축 해제됩니다
-• 스크린샷 형태 결과로 날짜 추출 정확도를 확인하세요
-• 기존 대비 성능 저하 없이 모든 문제가 해결되었습니다
+📦 첨부 파일:
+1. 🗜️ ZIP 압축파일: 모든 데이터 포함
+2. 📋 은행별 날짜확인 결과 (Excel)
+3. 📊 종합 요약 보고서 (Excel)
+4. 📄 상세 실행 로그
 """
 
-            # 첨부 파일 준비 (ZIP 파일을 최우선으로)
-            attachments = []
-            if zip_file and os.path.exists(zip_file):
-                attachments.append(zip_file)
-                log_message(f"   📎 ZIP 파일 첨부 준비: {os.path.basename(zip_file)}")
-            if screenshot_file and os.path.exists(screenshot_file):
-                attachments.append(screenshot_file)
-                log_message(f"   📎 스크린샷 결과 첨부 준비: {os.path.basename(screenshot_file)}")
-            if summary_file and os.path.exists(summary_file):
-                attachments.append(summary_file)
-                log_message(f"   📎 요약 보고서 첨부 준비: {os.path.basename(summary_file)}")
-            if os.path.exists(LOG_FILE):
-                attachments.append(LOG_FILE)
-                log_message(f"   📎 실행 로그 첨부 준비: {os.path.basename(LOG_FILE)}")
+            attachments_email = []
+            if zip_file and os.path.exists(zip_file): attachments_email.append(zip_file)
+            if screenshot_file and os.path.exists(screenshot_file): attachments_email.append(screenshot_file)
+            if summary_file and os.path.exists(summary_file): attachments_email.append(summary_file)
+            if os.path.exists(LOG_FILE): attachments_email.append(LOG_FILE)
 
-            # 예상 날짜 정보 가져오기
-            expected_dates = validate_data_freshness()
+            expected_dates_for_email_content = validate_data_freshness() # 이메일 내용용
 
-            # 이메일 발송
-            is_success = len(failed_banks) == 0
-            email_success = send_email_notification(subject, body, bank_details, attachments, is_success, expected_dates)
+            email_sent_successfully = send_email_notification(
+                subject_email, 
+                body_text_email, 
+                email_table_data, # generate_screenshot_format_report에서 반환된 데이터
+                attachments_email, 
+                not failed_banks, # 전체 성공 여부
+                expected_dates_for_email_content
+            )
             
-            if email_success:
-                log_message(f"   ✅ 이메일 발송 성공")
+            if email_sent_successfully:
+                log_message(f"    ✅ 이메일 발송 성공")
             else:
-                log_message(f"   ❌ 이메일 발송 실패")
+                log_message(f"    ❌ 이메일 발송 실패")
         else:
             log_message(f"\n📧 이메일 알림: 설정되지 않음")
 
-        # 최종 성공 메시지
-        log_message(f"\n🎊 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 (v2.2 최소수정) [{TODAY}] =====")
-        log_message(f"🏆 주요 성과:")
-        log_message(f"   • ⚡ 기존 7-8분 처리 속도 완전 유지")
-        log_message(f"   • 🎯 문제 은행만 선택적 정밀 처리로 효율성 극대화")
-        log_message(f"   • 📦 ZIP 파일 .bin 오류 완전 해결")
-        log_message(f"   • 📋 사용자 친화적 스크린샷 형태 결과 제공")
-        log_message(f"   • 🔧 최소 침습적 수정으로 안정성 보장")
-
-        if not target_achieved:
-            log_message(f"\n⚠️ 성능 알림: 목표 시간(8분)을 {int((total_duration - 8*60)/60)}분 {int((total_duration - 8*60)%60)}초 초과했습니다.")
-            log_message(f"   원인 분석이 필요할 수 있습니다.")
+        log_message(f"\n🎊 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 (v2.3) [{TODAY}] =====")
 
     except KeyboardInterrupt:
         log_message("\n⏹️ 사용자에 의해 중단되었습니다.")
@@ -1943,24 +1767,15 @@ def main():
         import traceback
         log_message(f"상세 오류 정보:\n{traceback.format_exc()}")
         
-        # 오류 발생 시에도 이메일 알림 발송
         if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and RECIPIENT_EMAILS:
-            error_subject = f"❌ 저축은행 데이터 스크래핑 오류 발생 (v2.2 최소수정) - {TODAY}"
-            error_body = f"""저축은행 데이터 스크래핑 v2.2 최소 수정 버전 실행 중 오류가 발생했습니다.
-
-🔧 v2.2 최소 수정 버전에서 발생한 오류:
+            error_subject_email = f"❌ 저축은행 데이터 스크래핑 오류 발생 (v2.3) - {TODAY}"
+            error_body_email = f"""저축은행 데이터 스크래핑 v2.3 버전 실행 중 오류가 발생했습니다.
 - 🕐 발생 시간: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}
 - 🐛 오류 내용: {str(e)}
-- 📍 오류 위치: 메인 실행 함수
-
-최소한의 수정으로 기존 성능을 유지하려 했으나 예상치 못한 오류가 발생했습니다.
-자세한 내용은 첨부된 로그 파일을 확인해주세요.
-
-GitHub Actions 워크플로우를 다시 실행하거나, 
-개발팀에 문의하여 추가적인 디버깅이 필요할 수 있습니다.
+상세 내용은 첨부된 로그 파일을 확인해주세요.
 """
-            attachments = [LOG_FILE] if os.path.exists(LOG_FILE) else []
-            send_email_notification(error_subject, error_body, None, attachments, False)
+            error_attachments = [LOG_FILE] if os.path.exists(LOG_FILE) else []
+            send_email_notification(error_subject_email, error_body_email, None, error_attachments, False)
 
 # =============================================================================
 # 프로그램 진입점
@@ -1968,3 +1783,4 @@ GitHub Actions 워크플로우를 다시 실행하거나,
 
 if __name__ == "__main__":
     main()
+�

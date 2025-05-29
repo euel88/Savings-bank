@@ -1396,7 +1396,22 @@ def generate_screenshot_format_report(all_run_results): # worker_process_bank �
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         table_data = [] # Excel 및 이메일용 데이터
 
+        unique_bank_results = {} # 은행별 마지막 결과만 저장하기 위함
         for bank_result in all_run_results:
+            unique_bank_results[bank_result[0]] = bank_result # 은행 이름으로 덮어쓰면 마지막 결과만 남음
+
+        for bank_name_key in BANKS: # 원래 은행 순서대로 처리
+            bank_result = unique_bank_results.get(bank_name_key)
+            if not bank_result: # 혹시 결과에 없는 은행이 있다면 (실패 등으로)
+                table_data.append({
+                    '은행명': bank_name_key,
+                    '공시 날짜(월말)': '결과 없음',
+                    '날짜 확인': '❌ 미처리/오류',
+                    '처리상태': '실패',
+                    '확인 시간': current_time
+                })
+                continue
+
             bank_name, success, date_info_raw, is_fresh = bank_result
             
             date_info_for_report = str(date_info_raw) # 문자열로 변환
@@ -1404,29 +1419,27 @@ def generate_screenshot_format_report(all_run_results): # worker_process_bank �
             # 처리상태 결정
             if success:
                 processing_status = "완료"
-            else: # 실패한 경우, progress_manager에서 최종 상태 확인 가능하나, 여기서는 단순화
+            else: 
                 processing_status = "실패"
-                # 실패 시 날짜 정보가 오류 메시지일 수 있으므로, "추출 실패" 등으로 통일
-                if "오류" in date_info_for_report or "실패" in date_info_for_report:
+                if "오류" in date_info_for_report or "실패" in date_info_for_report or not date_info_for_report:
                      date_info_for_report = "추출 실패"
 
 
             # 날짜 확인 상태 결정
             date_status = "⚠️ 확인필요" # 기본값
-            if date_info_for_report in ["날짜 정보 없음", "추출 실패"]:
+            if date_info_for_report in ["날짜 정보 없음", "추출 실패", "결과 없음"]:
                 date_status = "❌ 미처리/오류"
-            elif is_fresh: # is_fresh가 True이면 사용자가 원하는 두 날짜 중 하나임
-                if "2024년9월말" in date_info_for_report: # extract_date_information에서 정규화된 값
+            elif is_fresh: 
+                if "2024년9월말" in date_info_for_report: 
                     date_status = "✅ 일치 (기한내최신)"
                 elif "2025년3월말" in date_info_for_report:
                     date_status = "🟢 일치 (예정보다선반영)"
-                else: # is_fresh가 True인데, 위의 특정 문자열이 없다면 일반적인 '일치'
+                else: 
                     date_status = "✅ 일치 (확인됨)" 
-            else: # is_fresh가 False (유효한 두 날짜가 아님)
-                if date_info_for_report not in ["날짜 정보 없음", "추출 실패"]: # 날짜는 있지만 구버전
+            else: 
+                if date_info_for_report not in ["날짜 정보 없음", "추출 실패", "결과 없음"]: 
                      date_status = "⚠️ 불일치 (구버전)"
-                else: # 날짜 정보 자체가 없는 경우
-                     date_status = "❌ 미처리/오류"
+                # else: 이미 위에서 "❌ 미처리/오류"로 처리됨
 
 
             table_data.append({
@@ -1440,10 +1453,8 @@ def generate_screenshot_format_report(all_run_results): # worker_process_bank �
         # DataFrame 생성
         result_df = pd.DataFrame(table_data)
         
-        # 상태별로 정렬
-        status_order = {'완료': 0, '실패': 1} # 처리상태 단순화
-        result_df['정렬순서'] = result_df['처리상태'].map(status_order).fillna(2) # NaN은 마지막으로
-        result_df = result_df.sort_values(['정렬순서', '은행명']).drop('정렬순서', axis=1)
+        # 상태별로 정렬 (원래 은행 순서 유지를 위해 정렬 제거 또는 은행명 기준 정렬)
+        # result_df = result_df.sort_values(['은행명']).reset_index(drop=True) # 은행명 순으로 정렬
         
         # 스크린샷 형태의 결과 파일 저장
         screenshot_format_file = os.path.join(OUTPUT_DIR, f"은행별_날짜확인_결과_{TODAY}.xlsx")
@@ -1459,15 +1470,15 @@ def generate_screenshot_format_report(all_run_results): # worker_process_bank �
                     '완료된 은행 수 (처리상태 기준)',
                     '2024년9월말 데이터',
                     '2025년3월말 데이터',
-                    '기타/오래된 날짜 데이터',
+                    '기타/오래된 날짜 데이터 (완료 건 중)',
                     '처리 실패 은행 (처리상태 기준)',
                     '성공률 (처리상태 기준)'
                 ],
                 '수량': [
                     len(BANKS),
                     len([r for r in table_data if r['처리상태'] == '완료']),
-                    len([r for r in table_data if "2024년9월말" in r['공시 날짜(월말)']]),
-                    len([r for r in table_data if "2025년3월말" in r['공시 날짜(월말)']]),
+                    len([r for r in table_data if "2024년9월말" in r['공시 날짜(월말)'] and r['처리상태'] == '완료']),
+                    len([r for r in table_data if "2025년3월말" in r['공시 날짜(월말)'] and r['처리상태'] == '완료']),
                     len([r for r in table_data if r['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"] and r['처리상태'] == '완료']),
                     len([r for r in table_data if r['처리상태'] == '실패']),
                     f"{len([r for r in table_data if r['처리상태'] == '완료']) / len(BANKS) * 100:.1f}%" if len(BANKS) > 0 else "N/A"
@@ -1530,19 +1541,20 @@ def send_email_notification(subject, body_text_part, email_table_data=None, atta
           <head>
             <meta charset="UTF-8">
             <style>
-              body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; }}
-              table {{ border-collapse: collapse; width: 95%; margin: 20px auto; font-size: 10pt; }}
-              th, td {{ border: 1px solid #dddddd; text-align: left; padding: 6px; }}
-              th {{ background-color: #f2f2f2; }}
-              h2 {{ color: #333366; margin-left: 15px;}}
-              p {{ margin-left: 15px; line-height: 1.6;}}
-              .summary-section p {{ margin-left: 0; }} /* 요약 섹션의 p 태그 마진 초기화 */
-              .summary-section {{ white-space: pre-wrap; }} /* Plain text의 줄바꿈을 HTML에 반영 */
+              body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; color: #333; }}
+              table {{ border-collapse: collapse; width: 95%; margin: 20px auto; font-size: 10pt; box-shadow: 0 2px 3px rgba(0,0,0,0.1); }}
+              th, td {{ border: 1px solid #ddd; text-align: left; padding: 8px; }}
+              th {{ background-color: #f0f0f0; color: #333; font-weight: bold; }}
+              tr:nth-child(even) {{ background-color: #f9f9f9; }}
+              h2 {{ color: #0056b3; margin-left: 15px; border-bottom: 2px solid #0056b3; padding-bottom: 5px;}}
+              p {{ margin-left: 15px; line-height: 1.6; }}
+              .summary-section {{ padding:15px; background-color: #fdfdfd; border-radius: 5px; margin-bottom:15px;}}
+              .summary-section p {{ margin-left: 0; white-space: pre-wrap; }}
             </style>
           </head>
           <body>
             <div class="summary-section">
-              <p>{body_text_part.replace("\n", "<br>")}</p> {/* 문자열 내의 \n을 <br>로 변경 */}
+              <p>{body_text_part.replace("\n", "<br>")}</p>
             </div>
         """
 
@@ -1563,7 +1575,7 @@ def send_email_notification(subject, body_text_part, email_table_data=None, atta
                 html_body_content += f"<th>{header}</th>"
             html_body_content += "</tr></thead><tbody>"
 
-            for item in email_table_data:
+            for item in email_table_data: # email_table_data는 generate_screenshot_format_report에서 정렬된 순서
                 html_body_content += "<tr>"
                 html_body_content += f"<td>{item.get('은행명', '')}</td>"
                 html_body_content += f"<td>{item.get('공시 날짜(월말)', '')}</td>"
@@ -1608,7 +1620,7 @@ def send_email_notification(subject, body_text_part, email_table_data=None, atta
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             server.send_message(msg)
         
-        log_message(f"� 이메일 알림 발송 완료: {', '.join(RECIPIENT_EMAILS)}")
+        log_message(f"📧 이메일 알림 발송 완료: {', '.join(RECIPIENT_EMAILS)}")
         return True
             
     except Exception as e:
@@ -1631,13 +1643,13 @@ def main():
         print(f"로그 파일 초기화 실패: {e}")
 
     start_time = time.time()
-    log_message(f"\n🚀 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 시작 (v2.3 날짜/이메일 수정) [{TODAY}] =====\n")
+    log_message(f"\n🚀 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 시작 (v2.3.1 f-string 수정) [{TODAY}] =====\n")
 
     try:
-        log_message(f"🔧 이번 버전의 수정사항 (v2.3):")
+        log_message(f"🔧 이번 버전의 수정사항 (v2.3.1):")
+        log_message(f"  ✅ f-string 구성 방식 변경으로 SyntaxError 해결 시도")
         log_message(f"  ✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리")
         log_message(f"  ✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가 (HTML 형식)")
-        log_message(f"  ✅ ZIP 파일 생성 안정화 및 README 내용 업데이트")
         
         log_message(f"\n⚙️ 현재 설정값:")
         log_message(f"  • 최대 워커 수: {MAX_WORKERS}개")
@@ -1649,10 +1661,9 @@ def main():
 
 
         log_message(f"\n📊 결과 요약 보고서 생성 중...")
-        summary_file, stats = generate_summary_report() # progress_manager 기반 요약
+        summary_file, stats = generate_summary_report() 
 
         log_message(f"📋 스크린샷 형태 결과 테이블 생성 중...")
-        # all_run_results_for_report는 worker_process_bank의 반환값 리스트 [(bank, success, date_info, is_fresh), ...]
         screenshot_file, email_table_data_for_html = generate_screenshot_format_report(all_run_results_for_report)
 
 
@@ -1663,9 +1674,9 @@ def main():
         total_duration = end_time - start_time
         minutes, seconds = divmod(total_duration, 60)
         
-        target_achieved = total_duration <= 8 * 60  # 8분 이내 목표
+        target_achieved = total_duration <= 8 * 60
 
-        log_message(f"\n🎉 ===== 스크래핑 완료 (v2.3 날짜/이메일 수정) =====")
+        log_message(f"\n🎉 ===== 스크래핑 완료 (v2.3.1 f-string 수정) =====")
         log_message(f"⏰ 총 실행 시간: {int(minutes)}분 {int(seconds)}초")
         log_message(f"🎯 성능 목표: {'✅ 달성 (8분 이내)' if target_achieved else '⚠️ 목표 초과'}")
         log_message(f"✅ 성공한 은행 (ProgressManager 기준): {len(successful_banks)}개")
@@ -1674,8 +1685,7 @@ def main():
         if failed_banks:
             log_message(f"🔍 실패한 은행 목록 (ProgressManager 기준): {', '.join(failed_banks)}")
 
-        # generate_screenshot_format_report에서 생성된 문제 은행 정보 활용 가능
-        if email_table_data_for_html: # email_table_data_for_html가 생성되었다면
+        if email_table_data_for_html: 
             problem_banks_from_report = [b for b in email_table_data_for_html if b['날짜 확인'] not in ["✅ 일치 (기한내최신)", "🟢 일치 (예정보다선반영)", "✅ 일치 (확인됨)"]]
             if problem_banks_from_report:
                 log_message(f"⚠️ 날짜 확인 필요 은행 (보고서 기준): {len(problem_banks_from_report)}개")
@@ -1686,55 +1696,43 @@ def main():
 
 
         log_message(f"\n📁 생성된 파일 목록:")
-        if zip_file:
-            log_message(f"  📦 ZIP 압축파일: {os.path.basename(zip_file)} ✅")
-        else:
-            log_message(f"  📦 ZIP 압축파일: 생성 실패 ❌")
-            
-        if screenshot_file:
-            log_message(f"  📋 은행별 날짜확인 결과(Excel): {os.path.basename(screenshot_file)} ✅")
-        else:
-            log_message(f"  📋 은행별 날짜확인 결과(Excel): 생성 실패 ❌")
-            
-        if summary_file:
-            log_message(f"  📊 요약 보고서(Excel): {os.path.basename(summary_file)} ✅")
-        else:
-            log_message(f"  📊 요약 보고서(Excel): 생성 실패 ❌")
-
+        if zip_file: log_message(f"  📦 ZIP 압축파일: {os.path.basename(zip_file)} ✅")
+        else: log_message(f"  📦 ZIP 압축파일: 생성 실패 ❌")
+        if screenshot_file: log_message(f"  📋 은행별 날짜확인 결과(Excel): {os.path.basename(screenshot_file)} ✅")
+        else: log_message(f"  📋 은행별 날짜확인 결과(Excel): 생성 실패 ❌")
+        if summary_file: log_message(f"  📊 요약 보고서(Excel): {os.path.basename(summary_file)} ✅")
+        else: log_message(f"  📊 요약 보고서(Excel): 생성 실패 ❌")
         log_message(f"  📄 실행 로그: {os.path.basename(LOG_FILE)} ✅")
 
         if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and RECIPIENT_EMAILS:
             log_message(f"\n📧 이메일 알림 발송 중...")
             
-            subject_email = f"📊 저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} (v2.3) - {int(minutes)}분{int(seconds)}초"
+            subject_email = f"📊 저축은행 데이터 스크래핑 {'완료' if not failed_banks else '부분완료'} (v2.3.1) - {int(minutes)}분{int(seconds)}초"
             
-            # 이메일 본문의 Plain Text 부분
-            body_text_email = f"""저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.
-
-🔧 v2.3 수정 버전의 특징:
-✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리
-✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가 (HTML 형식)
-✅ ZIP 파일 생성 안정화 및 README 내용 업데이트
-
-📊 실행 정보:
-- 🕐 실행 날짜: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}
-- ⏱️ 총 실행 시간: {int(minutes)}분 {int(seconds)}초 ({'목표 달성' if target_achieved else '목표 초과'})
-- 🎯 처리 대상: 전국 {len(BANKS)}개 저축은행
-
-📈 스크래핑 결과 요약 (ProgressManager 기준):
-- 🏦 전체 은행 수: {stats.get('전체 은행 수', len(BANKS))}개
-- ✅ 완료 은행 수: {stats.get('완료 은행 수', len(successful_banks))}개
-- ⚠️ 부분 완료 은행 수: {stats.get('부분 완료 은행 수', 0)}개
-- ❌ 실패 은행 수: {stats.get('실패 은행 수', len(failed_banks))}개
-- 🟢 최신 데이터 은행 수 (공시정보 기준): {stats.get('최신 데이터 은행 수 (공시정보 기준)', 0)}개
-- 📊 전체 성공률 (완료+부분완료): {stats.get('성공률', '0.00%')}
-
-📦 첨부 파일:
-1. 🗜️ ZIP 압축파일: 모든 데이터 포함
-2. 📋 은행별 날짜확인 결과 (Excel)
-3. 📊 종합 요약 보고서 (Excel)
-4. 📄 상세 실행 로그
-"""
+            # 이메일 본문의 Plain Text 부분 - f-string 대신 format 또는 concatenation 사용
+            lines = []
+            lines.append("저축은행 중앙회 통일경영공시 데이터 스크래핑이 완료되었습니다.\n")
+            lines.append("🔧 v2.3.1 수정 버전의 특징:")
+            lines.append("✅ f-string 구성 방식 변경으로 SyntaxError 해결 시도")
+            lines.append("✅ 날짜 추출 로직 개선: 사용자 지정 날짜('2024년9월말', '2025년3월말')만 유효 처리")
+            lines.append("✅ 이메일 본문에 스크린샷 형태의 결과 테이블 추가 (HTML 형식)\n")
+            lines.append("📊 실행 정보:")
+            lines.append(f"- 🕐 실행 날짜: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}")
+            lines.append(f"- ⏱️ 총 실행 시간: {int(minutes)}분 {int(seconds)}초 ({'목표 달성' if target_achieved else '목표 초과'})")
+            lines.append(f"- 🎯 처리 대상: 전국 {len(BANKS)}개 저축은행\n")
+            lines.append("📈 스크래핑 결과 요약 (ProgressManager 기준):")
+            lines.append(f"- 🏦 전체 은행 수: {stats.get('전체 은행 수', len(BANKS))}개")
+            lines.append(f"- ✅ 완료 은행 수: {stats.get('완료 은행 수', len(successful_banks))}개")
+            lines.append(f"- ⚠️ 부분 완료 은행 수: {stats.get('부분 완료 은행 수', 0)}개")
+            lines.append(f"- ❌ 실패 은행 수: {stats.get('실패 은행 수', len(failed_banks))}개")
+            lines.append(f"- 🟢 최신 데이터 은행 수: {stats.get('최신 데이터 은행 수', 0)}개") # 키 수정
+            lines.append(f"- 📊 전체 성공률 (완료+부분완료): {stats.get('성공률', '0.00%')}\n")
+            lines.append("📦 첨부 파일:")
+            lines.append("1. 🗜️ ZIP 압축파일: 모든 데이터 포함")
+            lines.append("2. 📋 은행별 날짜확인 결과 (Excel)")
+            lines.append("3. 📊 종합 요약 보고서 (Excel)")
+            lines.append("4. 📄 상세 실행 로그")
+            body_text_email = "\n".join(lines)
 
             attachments_email = []
             if zip_file and os.path.exists(zip_file): attachments_email.append(zip_file)
@@ -1742,25 +1740,23 @@ def main():
             if summary_file and os.path.exists(summary_file): attachments_email.append(summary_file)
             if os.path.exists(LOG_FILE): attachments_email.append(LOG_FILE)
 
-            expected_dates_for_email_content = validate_data_freshness() # 이메일 내용용
+            expected_dates_for_email_content = validate_data_freshness() 
 
             email_sent_successfully = send_email_notification(
                 subject_email, 
                 body_text_email, 
-                email_table_data_for_html, # generate_screenshot_format_report에서 반환된 테이블 데이터
+                email_table_data_for_html, 
                 attachments_email, 
-                not failed_banks, # 전체 성공 여부
+                not failed_banks, 
                 expected_dates_for_email_content
             )
             
-            if email_sent_successfully:
-                log_message(f"    ✅ 이메일 발송 성공")
-            else:
-                log_message(f"    ❌ 이메일 발송 실패")
+            if email_sent_successfully: log_message(f"    ✅ 이메일 발송 성공")
+            else: log_message(f"    ❌ 이메일 발송 실패")
         else:
             log_message(f"\n📧 이메일 알림: 설정되지 않음")
 
-        log_message(f"\n🎊 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 (v2.3) [{TODAY}] =====")
+        log_message(f"\n🎊 ===== 저축은행 중앙회 통일경영공시 데이터 스크래핑 완료 (v2.3.1) [{TODAY}] =====")
 
     except KeyboardInterrupt:
         log_message("\n⏹️ 사용자에 의해 중단되었습니다.")
@@ -1770,14 +1766,21 @@ def main():
         log_message(f"상세 오류 정보:\n{traceback.format_exc()}")
         
         if GMAIL_ADDRESS and GMAIL_APP_PASSWORD and RECIPIENT_EMAILS:
-            error_subject_email = f"❌ 저축은행 데이터 스크래핑 오류 발생 (v2.3) - {TODAY}"
-            error_body_email = f"""저축은행 데이터 스크래핑 v2.3 버전 실행 중 오류가 발생했습니다.
-- 🕐 발생 시간: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}
-- 🐛 오류 내용: {str(e)}
-상세 내용은 첨부된 로그 파일을 확인해주세요.
-"""
+            error_lines = []
+            error_lines.append("저축은행 데이터 스크래핑 v2.3.1 버전 실행 중 오류가 발생했습니다.\n")
+            error_lines.append(f"- 🕐 발생 시간: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}")
+            error_lines.append(f"- 🐛 오류 내용: {str(e)}")
+            error_lines.append("상세 내용은 첨부된 로그 파일을 확인해주세요.")
+            error_body_email = "\n".join(error_lines)
+            
             error_attachments = [LOG_FILE] if os.path.exists(LOG_FILE) else []
-            send_email_notification(error_subject_email, error_body_email, None, error_attachments, False)
+            send_email_notification(
+                f"❌ 저축은행 데이터 스크래핑 오류 발생 (v2.3.1) - {TODAY}", 
+                error_body_email, 
+                None, 
+                error_attachments, 
+                False
+            )
 
 # =============================================================================
 # 프로그램 진입점
@@ -1785,4 +1788,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-�

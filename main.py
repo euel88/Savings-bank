@@ -1212,39 +1212,36 @@ class IntegratedBankScraperGUI:
             )
             
             # 엑셀 파일 생성
-            comparison_data = []
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 # 결산공시 데이터
                 if settlement_data:
                     settlement_df = pd.DataFrame(settlement_data)
                     settlement_df.to_excel(writer, sheet_name='결산공시', index=False)
-
-                # 분기공시 데이터
+                
+                # 분기공시 데이터  
                 if quarterly_data:
                     quarterly_df = pd.DataFrame(quarterly_data)
                     quarterly_df.to_excel(writer, sheet_name='분기공시', index=False)
-
+                
                 # 통합 비교 시트
                 if settlement_data and quarterly_data:
                     comparison_data = self._create_comparison_data(settlement_data, quarterly_data)
                     if comparison_data:
                         comparison_df = pd.DataFrame(comparison_data)
                         comparison_df.to_excel(writer, sheet_name='결산vs분기비교', index=False)
-
-            # MD 보고서도 생성
-            md_file = output_file.replace('.xlsx', '.md')
-            self._create_integrated_md_report(
-                settlement_data, quarterly_data, comparison_data, md_file
-            )
-
+            
+            # MD 요약도 함께 생성
+            md_file = output_file.replace('.xlsx', '_요약.md')
+            self._create_quick_md_summary(settlement_data, quarterly_data, md_file)
+            
             # 완료 알림
             self.root.after(
-                0,
+                0, 
                 lambda: messagebox.showinfo(
-                    "완료",
+                    "완료", 
                     f"통합 재무 보고서가 생성되었습니다!\n\n"
                     f"엑셀 파일: {os.path.basename(output_file)}\n"
-                    f"MD 파일: {os.path.basename(md_file)}\n"
+                    f"MD 요약: {os.path.basename(md_file)}\n"
                     f"위치: {os.path.dirname(output_file)}"
                 )
             )
@@ -1301,65 +1298,31 @@ class IntegratedBankScraperGUI:
         except Exception as e:
             return []
     
-    def _create_integrated_md_report(self, settlement_data, quarterly_data, comparison_data, output_file):
-        """엑셀과 동일한 내용의 통합 MD 보고서 생성"""
+    def _create_quick_md_summary(self, settlement_data, quarterly_data, output_file):
+        """빠른 MD 요약 생성"""
         try:
             with open(output_file, 'w', encoding='utf-8') as f:
-                # 헤더
-                f.write("# 📊 저축은행 통합 재무 보고서\n\n")
+                f.write("# 📊 저축은행 통합 재무 보고서 요약\n\n")
                 f.write(f"**생성일시**: {datetime.now().strftime('%Y년 %m월 %d일 %H:%M:%S')}\n\n")
-
-                def write_table(df):
-                    if df.empty:
-                        f.write("*데이터가 없습니다.*\n\n")
-                        return
-
-                    df_clean = df.copy()
-                    df_clean.columns = [
-                        str(col).replace('\n', ' ').replace('|', '\\|')
-                        for col in df_clean.columns
-                    ]
-
-                    headers = '| ' + ' | '.join(df_clean.columns) + ' |\n'
-                    separator = '|' + '|'.join([' --- ' for _ in df_clean.columns]) + '|\n'
-                    f.write(headers)
-                    f.write(separator)
-
-                    max_rows = min(100, len(df_clean))
-                    for idx in range(max_rows):
-                        row = df_clean.iloc[idx]
-                        row_data = []
-                        for value in row:
-                            str_value = str(value).replace('|', '\\|').replace('\n', ' ')
-                            if str_value == 'nan' or str_value == 'None':
-                                str_value = ''
-                            row_data.append(str_value)
-                        f.write('| ' + ' | '.join(row_data) + ' |\n')
-
-                    if len(df_clean) > max_rows:
-                        f.write(f"\n*({len(df_clean) - max_rows}개 행 더 있음...)*\n")
-
-                    f.write('\n')
-
-                # 결산공시 데이터
-                if settlement_data:
-                    f.write("## 📘 결산공시 데이터\n\n")
-                    write_table(pd.DataFrame(settlement_data))
-
-                # 분기공시 데이터
-                if quarterly_data:
-                    f.write("## 📙 분기공시 데이터\n\n")
-                    write_table(pd.DataFrame(quarterly_data))
-
-                # 비교 데이터
-                if comparison_data:
-                    f.write("## 🔄 결산 vs 분기 비교\n\n")
-                    write_table(pd.DataFrame(comparison_data))
-
-                # 푸터
+                
+                f.write("## 📈 데이터 현황\n\n")
+                f.write(f"- 결산공시 데이터: {len(settlement_data) if settlement_data else 0}개 은행\n")
+                f.write(f"- 분기공시 데이터: {len(quarterly_data) if quarterly_data else 0}개 은행\n\n")
+                
+                if settlement_data and quarterly_data:
+                    common_banks = (
+                        set([d['은행명'] for d in settlement_data]) & 
+                        set([d['은행명'] for d in quarterly_data])
+                    )
+                    f.write(f"- 공통 데이터 보유 은행: {len(common_banks)}개\n\n")
+                
+                f.write("## 💡 주요 발견사항\n\n")
+                f.write("- 상세한 분석 내용은 함께 생성된 엑셀 파일을 참조하세요.\n")
+                f.write("- 각 탭별로 결산공시, 분기공시, 비교분석 데이터가 정리되어 있습니다.\n\n")
+                
                 f.write("---\n")
                 f.write("*저축은행 통합 데이터 스크래퍼 v3.1*\n")
-
+                
         except Exception as e:
             pass  # MD 생성 실패해도 엑셀은 생성됨
     
